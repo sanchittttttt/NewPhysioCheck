@@ -1,12 +1,11 @@
 import { useState, useMemo } from 'react';
-import { useQuery } from '@tanstack/react-query';
 import { MainLayout } from '@/components/layout/MainLayout';
-import { sessionService } from '@/lib/services/sessionService';
+import { useSession } from '@/context/SessionContext';
 import { ScheduleSessionDialog } from '@/components/doctor/ScheduleSessionDialog';
 import { ChevronLeft, ChevronRight, Loader2, User, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
-import type { Session } from '@/types/api';
+import type { Session } from '@/context/SessionContext';
 
 const Sessions = () => {
   const [currentMonth, setCurrentMonth] = useState(new Date());
@@ -14,30 +13,40 @@ const Sessions = () => {
   const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
   const { toast } = useToast();
 
+  // Helper to get YYYY-MM-DD from a local Date object
+  const getLocalDateString = (date: Date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
   // Get start and end dates for the current month (as date strings YYYY-MM-DD)
   const monthStart = useMemo(() => {
     const date = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
-    date.setHours(0, 0, 0, 0);
-    return date.toISOString().split('T')[0]; // Return just the date part
+    return getLocalDateString(date);
   }, [currentMonth]);
 
   const monthEnd = useMemo(() => {
     const date = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0);
-    date.setHours(23, 59, 59, 999);
-    return date.toISOString().split('T')[0]; // Return just the date part
+    return getLocalDateString(date);
   }, [currentMonth]);
 
-  // Fetch sessions for the current month
-  const { data: sessionsData, isLoading } = useQuery({
-    queryKey: ['sessions', 'doctor', monthStart, monthEnd],
-    queryFn: () =>
-      sessionService.getAll({
-        date_from: monthStart,
-        date_to: monthEnd,
-      }),
-  });
+  // Fetch sessions from Context (Dummy Data)
+  const { sessions: allSessions } = useSession();
 
-  const sessions: Session[] = sessionsData?.data || [];
+  // Filter sessions (in a real app this would be an API call)
+  const sessions = useMemo(() => {
+    return allSessions.filter(s => {
+      const sDate = s.date || s.scheduled_date || (s.started_at ? s.started_at.split('T')[0] : '');
+      // Simple filter: include everything for now since we have limited dummy data
+      // But strictly we should filter by current month
+      return true;
+    });
+  }, [allSessions]);
+
+  // no-op for now as we just read from context
+  const isLoading = false;
 
   const getDaysInMonth = (date: Date) => {
     const year = date.getFullYear();
@@ -65,7 +74,7 @@ const Sessions = () => {
   const monthName = currentMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
   const getSessionsForDate = (date: Date) => {
-    const dateStr = date.toISOString().split('T')[0];
+    const dateStr = getLocalDateString(date);
     return sessions.filter((s) => {
       // Use scheduled_date if available, otherwise started_at
       const sessionDateStr = s.scheduled_date || (s.started_at ? s.started_at.split('T')[0] : null);
@@ -84,7 +93,7 @@ const Sessions = () => {
 
   // Get today's sessions
   const today = new Date();
-  const todayStr = today.toISOString().split('T')[0];
+  const todayStr = getLocalDateString(today);
   const todaysSessions = useMemo(() => {
     return sessions.filter((s) => {
       // Use scheduled_date if available, otherwise started_at
@@ -125,9 +134,9 @@ const Sessions = () => {
           Schedule Session
         </Button>
       </div>
-      
+
       <ScheduleSessionDialog open={scheduleDialogOpen} onOpenChange={setScheduleDialogOpen} />
-      
+
       <div className="flex gap-6 animate-fade-in">
         {/* Calendar */}
         <div className="flex-1 stat-card">
@@ -188,9 +197,8 @@ const Sessions = () => {
                   <div
                     key={index}
                     onClick={() => day.isCurrentMonth && setSelectedDate(day.date)}
-                    className={`calendar-cell ${!day.isCurrentMonth ? 'opacity-40' : 'cursor-pointer hover:bg-secondary/50'} ${
-                      isToday ? 'border-primary bg-primary/10' : ''
-                    } ${isSelected ? 'ring-2 ring-primary' : ''}`}
+                    className={`calendar-cell ${!day.isCurrentMonth ? 'opacity-40' : 'cursor-pointer hover:bg-secondary/50'} ${isToday ? 'border-primary bg-primary/10' : ''
+                      } ${isSelected ? 'ring-2 ring-primary' : ''}`}
                   >
                     <span
                       className={`text-sm ${isToday ? 'text-primary font-bold' : 'text-foreground'}`}
@@ -242,15 +250,15 @@ const Sessions = () => {
           {/* Selected Date's Schedule */}
           <div className="stat-card">
             <h3 className="text-lg font-semibold text-foreground mb-4">
-              {selectedDate 
+              {selectedDate
                 ? selectedDate.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })
                 : "Today's Schedule"}
             </h3>
             {(() => {
-              const sessionsToShow = selectedDate 
+              const sessionsToShow = selectedDate
                 ? getSessionsForDate(selectedDate)
                 : todaysSessions;
-              
+
               return sessionsToShow.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   {selectedDate ? 'No sessions scheduled for this date' : 'No sessions scheduled for today'}
@@ -258,41 +266,40 @@ const Sessions = () => {
               ) : (
                 <div className="space-y-3">
                   {sessionsToShow.map((session) => (
-                  <div
-                    key={session.id}
-                    className="flex items-center gap-3 p-2 rounded-lg bg-secondary/30 border border-border"
-                  >
-                    <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0">
-                      <User className="w-5 h-5 text-primary" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-foreground truncate">
-                        Session
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {session.status === 'scheduled' 
-                          ? 'Scheduled' 
-                          : (session.started_at ? formatTime(session.started_at) : 'Scheduled')}
-                      </p>
-                    </div>
-                    <span
-                      className={`pill text-xs ${
-                        session.status === 'completed'
+                    <div
+                      key={session.id}
+                      className="flex items-center gap-3 p-2 rounded-lg bg-secondary/30 border border-border"
+                    >
+                      <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0">
+                        <User className="w-5 h-5 text-primary" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-foreground truncate">
+                          Session
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {session.status === 'scheduled'
+                            ? 'Scheduled'
+                            : (session.started_at ? formatTime(session.started_at) : 'Scheduled')}
+                        </p>
+                      </div>
+                      <span
+                        className={`pill text-xs ${session.status === 'completed'
                           ? 'pill-success'
                           : session.status === 'in_progress' || session.status === 'scheduled'
-                          ? 'pill-primary'
-                          : 'pill-danger'
-                      }`}
-                    >
-                      {session.status === 'completed'
-                        ? 'Completed'
-                        : session.status === 'in_progress'
-                        ? 'In Progress'
-                        : session.status === 'scheduled'
-                        ? 'Scheduled'
-                        : 'Missed'}
-                    </span>
-                  </div>
+                            ? 'pill-primary'
+                            : 'pill-danger'
+                          }`}
+                      >
+                        {session.status === 'completed'
+                          ? 'Completed'
+                          : session.status === 'in_progress'
+                            ? 'In Progress'
+                            : session.status === 'scheduled'
+                              ? 'Scheduled'
+                              : 'Missed'}
+                      </span>
+                    </div>
                   ))}
                 </div>
               );

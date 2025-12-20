@@ -3,6 +3,7 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App.tsx";
 import { AuthProvider } from "./context/AuthContext";
 import { ProtocolProvider } from "./context/ProtocolContext";
+import { SessionProvider } from "./context/SessionContext";
 import "./index.css";
 
 // Note: We keep auth data in localStorage so users stay logged in
@@ -11,14 +12,16 @@ import "./index.css";
 createRoot(document.getElementById("root")!).render(
   <AuthProvider>
     <ProtocolProvider>
-      <BrowserRouter
-        future={{
-          v7_startTransition: true,
-          v7_relativeSplatPath: true,
-        }}
-      >
-        <App />
-      </BrowserRouter>
+      <SessionProvider>
+        <BrowserRouter
+          future={{
+            v7_startTransition: true,
+            v7_relativeSplatPath: true,
+          }}
+        >
+          <App />
+        </BrowserRouter>
+      </SessionProvider>
     </ProtocolProvider>
   </AuthProvider>
 );
