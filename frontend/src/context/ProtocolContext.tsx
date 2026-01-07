@@ -1,131 +1,216 @@
-import { createContext, useContext, useState, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { useAuth } from './AuthContext';
 import type { Protocol, ProtocolStep, Exercise } from '@/types/api';
+import { supabase } from '@/lib/supabaseClient';
+import { getDemoUser } from '@/lib/demoAuth';
 
 import StraightLegRaiseImg from '@/assets/images/StraightLegRaise.png';
 import SquatImg from '@/assets/images/Squat.png';
 import ElbowFlexionImg from '@/assets/images/ElbowFlexion.png';
 
-// Re-export Exercise from api.ts effectively by using it
+// Re-export Exercise from api.ts
 export { type Exercise };
 
 interface ProtocolContextType {
     exercises: Exercise[];
     protocols: Protocol[];
-    createProtocol: (input: { title: string; steps: Omit<ProtocolStep, 'id' | 'created_at' | 'protocol_id'>[] }) => Protocol;
+    loading: boolean;
+    createProtocol: (input: { title: string; steps: Omit<ProtocolStep, 'id' | 'created_at' | 'protocol_id'>[] }) => Promise<Protocol | null>;
+    refreshProtocols: () => Promise<void>;
 }
 
 const ProtocolContext = createContext<ProtocolContextType | undefined>(undefined);
 
-// Dummy Exercises Data matching Exercise interface from api.ts
-const DUMMY_EXERCISES: Exercise[] = [
-    {
-        id: 'ex-1',
-        name: 'Straight Leg Raise',
-        description: 'Lift your leg while keeping it straight.',
-        joint: 'Knee',
-        difficulty: 'Beginner',
-        position: 'Supine',
-        image_url: StraightLegRaiseImg,
-        created_at: new Date().toISOString(),
-        normal_range_min: null,
-        normal_range_max: null,
-        equipment: null
-    },
-    {
-        id: 'ex-2',
-        name: 'Squat',
-        description: 'Basic squat movement.',
-        joint: 'Hip/Knee',
-        difficulty: 'Intermediate',
-        position: 'Standing',
-        image_url: SquatImg,
-        created_at: new Date().toISOString(),
-        normal_range_min: null,
-        normal_range_max: null,
-        equipment: null
-    },
-    {
-        id: 'ex-3',
-        name: 'Elbow Flexion',
-        description: 'Bending the elbow.',
-        joint: 'Elbow',
-        difficulty: 'Beginner',
-        position: 'Sitting',
-        image_url: ElbowFlexionImg,
-        created_at: new Date().toISOString(),
-        normal_range_min: null,
-        normal_range_max: null,
-        equipment: null
-    }
-];
+// Default exercise images mapping
+const EXERCISE_IMAGES: Record<string, string> = {
+    'slr': StraightLegRaiseImg,
+    'straight_leg_raise': StraightLegRaiseImg,
+    'squat': SquatImg,
+    'elbow_flexion': ElbowFlexionImg,
+};
 
 export function ProtocolProvider({ children }: { children: ReactNode }) {
     const { user } = useAuth();
-    const [protocols, setProtocols] = useState<Protocol[]>(() => {
-        const stored = localStorage.getItem('dummy_protocols');
-        if (stored) {
-            try {
-                const parsed = JSON.parse(stored);
-                // Migration: Handle legacy data where 'name' was used instead of 'title'
-                // and 'exercises' were used instead of 'steps'
-                return parsed.map((p: any) => ({
-                    ...p,
-                    title: p.title || p.name || 'Untitled Protocol', // Fallback for legacy 'name'
-                    steps: p.steps || p.exercises?.map((ex: any, idx: number) => ({ // Fallback for legacy 'exercises'
-                        id: ex.id || crypto.randomUUID(),
-                        protocol_id: p.id,
-                        exercise_id: ex.exerciseId || ex.exercise_id,
-                        sets: ex.sets,
-                        reps: ex.reps,
-                        duration_seconds: ex.duration_seconds,
-                        side: ex.side,
-                        order_index: idx,
-                        created_at: new Date().toISOString()
-                    })) || []
-                }));
-            } catch (e) {
-                console.error('Failed to parse protocols', e);
-                return [];
+    const [exercises, setExercises] = useState<Exercise[]>([]);
+    const [protocols, setProtocols] = useState<Protocol[]>([]);
+    const [loading, setLoading] = useState(true);
+
+    // Fetch exercises from Supabase
+    const fetchExercises = async () => {
+        try {
+            const { data, error } = await supabase
+                .from('exercises')
+                .select('*')
+                .order('name');
+
+            if (error) {
+                console.error('[ProtocolContext] fetchExercises error:', error);
+                return;
             }
+
+            // Map database exercises to Exercise type with images
+            const mapped: Exercise[] = (data || []).map((ex: any) => ({
+                id: ex.id,
+                name: ex.name,
+                description: ex.description,
+                joint: ex.joint,
+                difficulty: ex.difficulty,
+                position: ex.position,
+                image_url: EXERCISE_IMAGES[ex.slug] || ex.image_url || null,
+                created_at: ex.created_at,
+                normal_range_min: ex.normal_rom_min,
+                normal_range_max: ex.normal_rom_max,
+                equipment: null,
+            }));
+
+            setExercises(mapped);
+        } catch (e) {
+            console.error('[ProtocolContext] fetchExercises exception:', e);
         }
-        return [];
-    });
+    };
 
-    const createProtocol = (input: { title: string; steps: Omit<ProtocolStep, 'id' | 'created_at' | 'protocol_id'>[] }) => {
-        const protocolId = crypto.randomUUID();
-        const newProtocol: Protocol = {
-            id: protocolId,
-            title: input.title,
-            doctor_id: user?.id || 'unknown',
-            notes: null,
-            created_at: new Date().toISOString(),
-            steps: input.steps.map((step, index) => ({
-                ...step,
-                id: crypto.randomUUID(),
-                protocol_id: protocolId,
-                created_at: new Date().toISOString(),
-                // Ensure required fields are present (handling optional vs null differences if any)
-                sets: step.sets ?? null,
-                reps: step.reps ?? null,
-                duration_seconds: step.duration_seconds ?? null,
-                side: step.side ?? null,
-                notes: step.notes ?? null,
-                order_index: index
-            }))
+    // Fetch protocols from Supabase
+    const fetchProtocols = async () => {
+        const demoUser = getDemoUser();
+        if (!demoUser) {
+            setProtocols([]);
+            return;
+        }
+
+        try {
+            let query = supabase
+                .from('protocols')
+                .select('*')
+                .order('created_at', { ascending: false });
+
+            // If doctor, get only their protocols
+            if (demoUser.role === 'doctor') {
+                query = query.eq('doctor_id', demoUser.id);
+            }
+
+            const { data, error } = await query;
+
+            if (error) {
+                console.error('[ProtocolContext] fetchProtocols error:', error);
+                return;
+            }
+
+            // Map to Protocol type
+            const mapped: Protocol[] = (data || []).map((p: any) => ({
+                id: p.id,
+                title: p.title,
+                doctor_id: p.doctor_id,
+                notes: p.description || p.notes,
+                created_at: p.created_at,
+                steps: [], // Steps would be fetched separately if needed
+            }));
+
+            setProtocols(mapped);
+        } catch (e) {
+            console.error('[ProtocolContext] fetchProtocols exception:', e);
+        }
+    };
+
+    // Initial load
+    useEffect(() => {
+        const load = async () => {
+            setLoading(true);
+            await Promise.all([fetchExercises(), fetchProtocols()]);
+            setLoading(false);
         };
+        load();
+    }, [user]);
 
-        const updated = [...protocols, newProtocol];
-        setProtocols(updated);
-        localStorage.setItem('dummy_protocols', JSON.stringify(updated));
-        console.log('PROTOCOL_CREATED', newProtocol);
-        return newProtocol;
+    // Create protocol in Supabase
+    const createProtocol = async (input: { title: string; steps: Omit<ProtocolStep, 'id' | 'created_at' | 'protocol_id'>[] }): Promise<Protocol | null> => {
+        const demoUser = getDemoUser();
+        if (!demoUser || demoUser.role !== 'doctor') {
+            console.error('[ProtocolContext] Must be logged in as doctor');
+            return null;
+        }
+
+        try {
+            const { data, error } = await supabase
+                .from('protocols')
+                .insert({
+                    doctor_id: demoUser.id,
+                    title: input.title,
+                    description: null,
+                    notes: null,
+                } as any)
+                .select()
+                .single();
+
+            if (error || !data) {
+                console.error('[ProtocolContext] createProtocol error:', error);
+                return null;
+            }
+
+            const protocolData = data as any;
+
+            // Insert steps into database
+            if (input.steps.length > 0) {
+                const stepsPayload = input.steps.map((step, index) => ({
+                    protocol_id: protocolData.id,
+                    exercise_id: step.exercise_id,
+                    sets: step.sets ?? 3,
+                    reps: step.reps ?? 10,
+                    duration_seconds: step.duration_seconds ?? null,
+                    side: step.side ?? 'both',
+                    notes: step.notes ?? null,
+                    order_index: step.order_index ?? index,
+                }));
+
+                const { error: stepsError } = await supabase
+                    .from('protocol_steps')
+                    .insert(stepsPayload as any);
+
+                if (stepsError) {
+                    console.error('[ProtocolContext] Error creating steps:', stepsError);
+                }
+            }
+
+            const newProtocol: Protocol = {
+                id: protocolData.id,
+                title: protocolData.title,
+                doctor_id: protocolData.doctor_id,
+                notes: protocolData.notes,
+                created_at: protocolData.created_at,
+                steps: input.steps.map((step, index) => ({
+                    ...step,
+                    id: crypto.randomUUID(),
+                    protocol_id: protocolData.id,
+                    created_at: new Date().toISOString(),
+                    sets: step.sets ?? null,
+                    reps: step.reps ?? null,
+                    duration_seconds: step.duration_seconds ?? null,
+                    side: step.side ?? null,
+                    notes: step.notes ?? null,
+                    order_index: index
+                }))
+            };
+
+            // Update local state
+            setProtocols(prev => [newProtocol, ...prev]);
+
+            console.log('[ProtocolContext] Protocol created:', newProtocol.id);
+            return newProtocol;
+        } catch (e) {
+            console.error('[ProtocolContext] createProtocol exception:', e);
+            return null;
+        }
+    };
+
+    const refreshProtocols = async () => {
+        await fetchProtocols();
     };
 
     const value = {
-        exercises: DUMMY_EXERCISES,
+        exercises,
         protocols,
-        createProtocol
+        loading,
+        createProtocol,
+        refreshProtocols,
     };
 
     return <ProtocolContext.Provider value={value}>{children}</ProtocolContext.Provider>;

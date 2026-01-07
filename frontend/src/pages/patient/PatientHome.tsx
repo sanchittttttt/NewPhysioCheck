@@ -8,7 +8,8 @@ import { useAuth } from '@/context/AuthContext';
 import { useSession } from '@/context/SessionContext';
 import { useProtocol } from '@/context/ProtocolContext';
 import { useMessages } from '@/context/MessageContext';
-import { useMemo } from 'react';
+import { useMemo, useState, useEffect } from 'react';
+import { supabase } from '@/lib/supabaseClient';
 import type { Session, Protocol, Message, Assignment } from '@/types/api';
 
 function CircularProgress({ value, size = 120 }: { value: number; size?: number }) {
@@ -73,7 +74,56 @@ export default function PatientHome() {
   // Derived data
   const protocols = allProtocols;
   const sessionsLoading = false; // Sync data
-  const assignments: Assignment[] = []; // No assignment context yet, ignore for now or infer
+
+  // Fetch assignments from Supabase
+  const [assignments, setAssignments] = useState<Assignment[]>([]);
+  const [assignmentsLoading, setAssignmentsLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchAssignments = async () => {
+      if (!user?.id) {
+        setAssignments([]);
+        setAssignmentsLoading(false);
+        return;
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from('assignments')
+          .select('*')
+          .eq('patient_id', user.id)
+          .eq('status', 'active')
+          .order('created_at', { ascending: false });
+
+        if (error) {
+          console.error('[PatientHome] Assignments fetch error:', error);
+          setAssignments([]);
+        } else {
+          // Map to Assignment type
+          const mapped: Assignment[] = (data || []).map((a: any) => ({
+            id: a.id,
+            patient_id: a.patient_id,
+            doctor_id: a.doctor_id,
+            protocol_id: a.protocol_id,
+            start_date: a.start_date,
+            end_date: a.end_date,
+            frequency_per_week: a.frequency_per_week,
+            status: a.status,
+            notes: a.notes,
+            created_at: a.created_at,
+          }));
+          setAssignments(mapped);
+        }
+      } catch (e) {
+        console.error('[PatientHome] Assignments exception:', e);
+        setAssignments([]);
+      } finally {
+        setAssignmentsLoading(false);
+      }
+    };
+
+    fetchAssignments();
+  }, [user?.id]);
 
   // Find today's session (scheduled for today or in progress)
   // Priority: in_progress > scheduled (for today) > completed (today)
@@ -183,15 +233,21 @@ export default function PatientHome() {
     return count;
   }, [sessions]);
 
-  // Get active protocols from unique protocolIds in sessions
+  // Get active protocols from assignments and sessions
   const activeProtocols = useMemo(() => {
-    if (!sessions.length || !protocols.length) return [];
+    // Get protocol IDs from assignments
+    const assignmentProtocolIds = assignments.map(a => a.protocol_id);
 
-    const activeIds = [...new Set(sessions.map(s => s.protocol_id))];
+    // Also get protocol IDs from sessions as fallback
+    const sessionProtocolIds = sessions.map(s => s.protocol_id);
+
+    // Combine and dedupe
+    const allIds = [...new Set([...assignmentProtocolIds, ...sessionProtocolIds])];
+
     return protocols
-      .filter(p => activeIds.includes(p.id))
+      .filter(p => allIds.includes(p.id))
       .slice(0, 3);
-  }, [sessions, protocols]);
+  }, [sessions, protocols, assignments]);
 
   // Get upcoming sessions (next 4) - includes scheduled and in_progress
   // Use scheduled_date if available, otherwise started_at

@@ -7,7 +7,9 @@ import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
 import { useSession } from '@/context/SessionContext';
 import { useProtocol } from '@/context/ProtocolContext';
-import { useNavigate } from 'react-router-dom';
+import { getDemoUser, getDoctorPatients, DemoUser } from '@/lib/demoAuth';
+import { supabase } from '@/lib/supabaseClient';
+import { Loader2 } from 'lucide-react';
 
 interface ScheduleSessionDialogProps {
   open: boolean;
@@ -25,6 +27,11 @@ export function ScheduleSessionDialog({ open, onOpenChange, patientId: initialPa
   const [notes, setNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Patients from Supabase
+  const [patients, setPatients] = useState<DemoUser[]>([]);
+  const [patientsLoading, setPatientsLoading] = useState(true);
+  const [selectedPatient, setSelectedPatient] = useState<DemoUser | null>(null);
+
   // Update selectedPatientId when initialPatientId changes
   useEffect(() => {
     if (initialPatientId) {
@@ -32,14 +39,37 @@ export function ScheduleSessionDialog({ open, onOpenChange, patientId: initialPa
     }
   }, [initialPatientId]);
 
-  // DUMMY PATIENTS
-  const patients = [
-    { id: 'patient-1', full_name: 'Demo Patient', condition: 'ACL Recovery' },
-    { id: 'patient-2', full_name: 'John Doe', condition: 'Shoulder Rehab' }
-  ];
+  // Fetch patients from Supabase
+  useEffect(() => {
+    const fetchPatients = async () => {
+      const user = getDemoUser();
+      if (user?.role === 'doctor') {
+        const doctorPatients = await getDoctorPatients(user.id);
+        setPatients(doctorPatients);
 
-  // In dummy mode, all protocols are available to assign
-  // Filter out any without names if necessary, though our dummy ones have names
+        // Find selected patient if we have an initial ID
+        if (initialPatientId) {
+          const found = doctorPatients.find(p => p.id === initialPatientId);
+          setSelectedPatient(found || null);
+        }
+      }
+      setPatientsLoading(false);
+    };
+
+    if (open) {
+      fetchPatients();
+    }
+  }, [open, initialPatientId]);
+
+  // Update selected patient when patient ID changes
+  useEffect(() => {
+    if (selectedPatientId && patients.length > 0) {
+      const found = patients.find(p => p.id === selectedPatientId);
+      setSelectedPatient(found || null);
+    }
+  }, [selectedPatientId, patients]);
+
+  // All protocols are available to assign in demo mode
   const assignedProtocols = protocols;
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -54,29 +84,30 @@ export function ScheduleSessionDialog({ open, onOpenChange, patientId: initialPa
     }
 
     setIsSubmitting(true);
-    // Simulate delay
-    await new Promise(resolve => setTimeout(resolve, 500));
 
     try {
-      createSession({
+      const result = await createSession({
         patient_id: selectedPatientId,
         protocol_id: selectedProtocolId,
-        date: sessionDate, // YYYY-MM-DD
+        date: sessionDate,
         notes
       });
 
-      toast({
-        title: 'Success',
-        description: 'Session scheduled successfully',
-      });
+      if (result) {
+        toast({
+          title: 'Success',
+          description: 'Session scheduled successfully',
+        });
 
-      // Reset
-      if (!initialPatientId) setSelectedPatientId('');
-      setSelectedProtocolId('');
-      setSessionDate('');
-      setNotes('');
-      onOpenChange(false);
-
+        // Reset
+        if (!initialPatientId) setSelectedPatientId('');
+        setSelectedProtocolId('');
+        setSessionDate('');
+        setNotes('');
+        onOpenChange(false);
+      } else {
+        throw new Error('Failed to create session');
+      }
     } catch (error) {
       console.error(error);
       toast({
@@ -102,31 +133,42 @@ export function ScheduleSessionDialog({ open, onOpenChange, patientId: initialPa
           {!initialPatientId && (
             <div className="space-y-2">
               <Label htmlFor="patient">Patient *</Label>
-              <select
-                id="patient"
-                value={selectedPatientId}
-                onChange={(e) => {
-                  setSelectedPatientId(e.target.value);
-                  setSelectedProtocolId(''); // Reset protocol when patient changes
-                }}
-                className="w-full px-3 py-2 bg-card border border-border rounded-lg"
-                required
-                disabled={isSubmitting}
-              >
-                <option value="">Select a patient...</option>
-                {patients.map((patient) => (
-                  <option key={patient.id} value={patient.id}>
-                    {patient.full_name} ({patient.condition || 'No condition'})
-                  </option>
-                ))}
-              </select>
+              {patientsLoading ? (
+                <div className="flex items-center gap-2 px-3 py-2 text-muted-foreground">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Loading patients...
+                </div>
+              ) : patients.length === 0 ? (
+                <div className="px-3 py-2 text-muted-foreground text-sm">
+                  No patients found. Add patients first.
+                </div>
+              ) : (
+                <select
+                  id="patient"
+                  value={selectedPatientId}
+                  onChange={(e) => {
+                    setSelectedPatientId(e.target.value);
+                    setSelectedProtocolId('');
+                  }}
+                  className="w-full px-3 py-2 bg-card border border-border rounded-lg"
+                  required
+                  disabled={isSubmitting}
+                >
+                  <option value="">Select a patient...</option>
+                  {patients.map((patient) => (
+                    <option key={patient.id} value={patient.id}>
+                      {patient.name} ({patient.email})
+                    </option>
+                  ))}
+                </select>
+              )}
             </div>
           )}
           {initialPatientId && (
             <div className="space-y-2">
               <Label htmlFor="patient">Patient</Label>
               <div className="w-full px-3 py-2 bg-muted border border-border rounded-lg text-muted-foreground">
-                {patients.find(p => p.id === initialPatientId)?.full_name || 'Loading...'}
+                {selectedPatient?.name || 'Loading...'}
               </div>
             </div>
           )}
@@ -142,7 +184,7 @@ export function ScheduleSessionDialog({ open, onOpenChange, patientId: initialPa
               disabled={!selectedPatientId || isSubmitting}
             >
               <option value="">
-                {!selectedPatientId ? 'Select patient first...' : assignedProtocols.length === 0 ? 'No assigned protocols' : 'Select a protocol...'}
+                {!selectedPatientId ? 'Select patient first...' : assignedProtocols.length === 0 ? 'No protocols available' : 'Select a protocol...'}
               </option>
               {assignedProtocols.map((protocol) => (
                 <option key={protocol.id} value={protocol.id}>
@@ -152,14 +194,14 @@ export function ScheduleSessionDialog({ open, onOpenChange, patientId: initialPa
             </select>
             {selectedPatientId && assignedProtocols.length === 0 && (
               <p className="text-xs text-muted-foreground">
-                No protocols assigned to this patient. Assign a protocol first.
+                No protocols created yet. Create a protocol in Protocol Builder first.
               </p>
             )}
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="date">Date</Label>
+              <Label htmlFor="date">Date *</Label>
               <Input
                 id="date"
                 type="date"
@@ -167,6 +209,7 @@ export function ScheduleSessionDialog({ open, onOpenChange, patientId: initialPa
                 onChange={(e) => setSessionDate(e.target.value)}
                 min={new Date().toISOString().split('T')[0]}
                 disabled={isSubmitting}
+                required
               />
             </div>
           </div>
@@ -192,8 +235,15 @@ export function ScheduleSessionDialog({ open, onOpenChange, patientId: initialPa
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={isSubmitting || !selectedPatientId || !selectedProtocolId}>
-              {isSubmitting ? 'Scheduling...' : 'Schedule Session'}
+            <Button type="submit" disabled={isSubmitting || !selectedPatientId || !selectedProtocolId || !sessionDate}>
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Scheduling...
+                </>
+              ) : (
+                'Schedule Session'
+              )}
             </Button>
           </div>
         </form>
@@ -201,4 +251,3 @@ export function ScheduleSessionDialog({ open, onOpenChange, patientId: initialPa
     </Dialog>
   );
 }
-

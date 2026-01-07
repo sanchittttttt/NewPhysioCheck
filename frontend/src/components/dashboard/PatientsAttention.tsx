@@ -1,37 +1,41 @@
 import { useSession } from '@/context/SessionContext';
-import { Loader2, User } from 'lucide-react';
-import { useMemo } from 'react';
-// Dummy Patient Type (simplified)
-interface Patient {
-  id: string;
-  full_name: string;
-  condition?: string;
-  status: string;
-}
+import { User } from 'lucide-react';
+import { useMemo, useState, useEffect } from 'react';
+import { getDemoUser, getDoctorPatients, DemoUser } from '@/lib/demoAuth';
+import { useNavigate } from 'react-router-dom';
 
 export function PatientsAttention() {
   const { sessions } = useSession();
+  const navigate = useNavigate();
+  const [patients, setPatients] = useState<DemoUser[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  // DUMMY PATIENTS (Shared dummy data)
-  const patients: Patient[] = [
-    { id: 'patient-1', full_name: 'Demo Patient', status: 'active', condition: 'ACL Recovery' },
-    { id: 'patient-2', full_name: 'John Doe', status: 'active', condition: 'Shoulder Rehab' }
-  ];
+  // Fetch patients from Supabase
+  useEffect(() => {
+    const fetchPatients = async () => {
+      const user = getDemoUser();
+      if (user?.role === 'doctor') {
+        const doctorPatients = await getDoctorPatients(user.id);
+        setPatients(doctorPatients);
+      }
+      setLoading(false);
+    };
+    fetchPatients();
+  }, []);
 
   // Calculate patients needing attention based on adherence and recent pain scores
   const patientsNeedingAttention = useMemo(() => {
     return patients
       .map((patient) => {
-        // Get sessions for this patient
-        const patientSessions = sessions.filter((s) => s.patientId === patient.id);
+        // Get sessions for this patient (use patient_id from session data)
+        const patientSessions = sessions.filter((s) => s.patient_id === patient.id);
         const completedSessions = patientSessions.filter((s) => s.status === 'completed');
 
-        // Calculate simple adherence: sessions completed vs expected (rough estimate)
-        // TODO: Replace with proper adherence calculation from assignments
+        // Calculate simple adherence
         const adherence =
-          completedSessions.length > 0
-            ? Math.min(100, (completedSessions.length / Math.max(patientSessions.length, 1)) * 100)
-            : 0;
+          patientSessions.length > 0
+            ? Math.round((completedSessions.length / patientSessions.length) * 100)
+            : 100; // Assume 100% if no sessions yet
 
         // Check for high pain scores in recent sessions
         const recentHighPain = completedSessions.some(
@@ -40,7 +44,7 @@ export function PatientsAttention() {
 
         // Determine attention level
         let attentionLevel: 'low' | 'high' | null = null;
-        if (adherence < 50) attentionLevel = 'low';
+        if (patientSessions.length > 0 && adherence < 50) attentionLevel = 'low';
         if (recentHighPain) attentionLevel = 'high';
 
         return {
@@ -48,6 +52,8 @@ export function PatientsAttention() {
           adherence,
           recentHighPain,
           attentionLevel,
+          totalSessions: patientSessions.length,
+          completedSessions: completedSessions.length,
         };
       })
       .filter((p) => p.attentionLevel !== null)
@@ -60,11 +66,22 @@ export function PatientsAttention() {
       .slice(0, 5); // Show top 5
   }, [patients, sessions]);
 
+  if (loading) {
+    return (
+      <div className="stat-card">
+        <h3 className="text-lg font-semibold text-foreground mb-4">Patients Needing Attention</h3>
+        <p className="text-sm text-muted-foreground">Loading patients...</p>
+      </div>
+    );
+  }
+
   if (patientsNeedingAttention.length === 0) {
     return (
       <div className="stat-card">
         <h3 className="text-lg font-semibold text-foreground mb-4">Patients Needing Attention</h3>
-        <p className="text-sm text-muted-foreground">All patients are doing well!</p>
+        <p className="text-sm text-muted-foreground">
+          {patients.length === 0 ? 'No patients assigned yet' : 'All patients are doing well!'}
+        </p>
       </div>
     );
   }
@@ -74,15 +91,19 @@ export function PatientsAttention() {
       <h3 className="text-lg font-semibold text-foreground mb-4">Patients Needing Attention</h3>
 
       <div className="space-y-4">
-        {patientsNeedingAttention.map(({ patient, adherence, recentHighPain, attentionLevel }) => (
-          <div key={patient.id} className="flex items-center gap-3">
+        {patientsNeedingAttention.map(({ patient, adherence, recentHighPain, attentionLevel, totalSessions, completedSessions }) => (
+          <div
+            key={patient.id}
+            className="flex items-center gap-3 cursor-pointer hover:bg-secondary/50 p-2 rounded-lg transition-colors"
+            onClick={() => navigate(`/patients/${patient.id}`)}
+          >
             <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0">
               <User className="w-5 h-5 text-primary" />
             </div>
             <div className="flex-1 min-w-0">
-              <p className="font-medium text-foreground truncate">{patient.full_name}</p>
+              <p className="font-medium text-foreground truncate">{patient.name}</p>
               <p className="text-sm text-muted-foreground truncate">
-                {patient.condition || 'No condition specified'}
+                {completedSessions}/{totalSessions} sessions completed
               </p>
             </div>
             <div className="flex gap-2 flex-shrink-0">

@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useMessages } from '@/context/MessageContext';
+import { useSearchParams } from 'react-router-dom';
 import { Search, Send, Loader2, User } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
-import type { Message, Patient } from '@/types/api';
-import { patientService } from '@/lib/services/patientService';
-import { useQuery } from '@tanstack/react-query';
+import { getDemoUser, getDoctorPatients, getPatientDoctor, DemoUser } from '@/lib/demoAuth';
 import { MainLayout } from '@/components/layout/MainLayout';
+import type { Message } from '@/types/api';
 
 const formatMessageTime = (dateString: string) => {
   const date = new Date(dateString);
@@ -35,120 +35,143 @@ const formatMessageDate = (dateString: string) => {
   return date.toLocaleDateString();
 };
 
+interface ConversationContact {
+  id: string;
+  name: string;
+  role: 'doctor' | 'patient';
+}
 
 const Messages = () => {
   const { user } = useAuth();
   const { toast } = useToast();
-  const { messages, sendMessage, getConversation, markAsRead } = useMessages();
-  const [selectedPatientId, setSelectedPatientId] = useState<string | null>(null);
+  const { messages, loading: messagesLoading, sendMessage, getConversation, markAsRead } = useMessages();
+  const [searchParams] = useSearchParams();
+  const initialContactId = searchParams.get('patientId') || searchParams.get('doctorId') || searchParams.get('userId') || searchParams.get('contactId');
+
+  const [selectedContactId, setSelectedContactId] = useState<string | null>(initialContactId);
   const [newMessage, setNewMessage] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
+  const [contacts, setContacts] = useState<ConversationContact[]>([]);
+  const [contactsLoading, setContactsLoading] = useState(true);
+  const [sending, setSending] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Still get patients for conversation list (mock service is fine)
-  const { data: patientsData, isLoading: patientsLoading } = useQuery({
-    queryKey: ['patients', 'for-messages'],
-    queryFn: () => patientService.getAll({ limit: 100 }),
-  });
-
-  // Get conversation with selected patient from context (Oldest to Newest)
-  const selectedConversation = useMemo(() => {
-    return selectedPatientId ? getConversation(selectedPatientId).slice().reverse() : [];
-  }, [selectedPatientId, messages, getConversation]);
-
-  // Mark as read when messages change or patient selected
+  // Fetch contacts based on user role
   useEffect(() => {
-    if (selectedPatientId) {
-      markAsRead(selectedPatientId);
-    }
-  }, [selectedPatientId, messages, markAsRead]);
-
-  // Build conversation list from messages and patients
-  const conversations = useMemo(() => {
-    let patients = patientsData?.data || [];
-
-    // Always add the demo patient if not present in the fetched data for hackathon
-    if (!patients.find(p => p.id === 'patient-1')) {
-      patients = [...patients, {
-        id: 'patient-1',
-        full_name: 'Demo Patient',
-        condition: 'Post-op Knee Rehab',
-        status: 'active',
-        doctor_id: 'doctor-1',
-        created_at: new Date().toISOString()
-      } as Patient];
-    }
-
-    const allMessagesList = messages;
-
-    // Group messages by other user (patient)
-    const conversationMap = new Map<string, { lastMessage: Message; unread: boolean }>();
-
-    allMessagesList.forEach((msg) => {
-      // For doctor, get messages where doctor is sender or receiver
-      const otherUserId = msg.from_user === user?.id ? msg.to_user : msg.from_user;
-      const existing = conversationMap.get(otherUserId);
-
-      if (!existing || new Date(msg.created_at) > new Date(existing.lastMessage.created_at)) {
-        conversationMap.set(otherUserId, {
-          lastMessage: msg,
-          unread: msg.from_user !== user?.id && !msg.read_at,
-        });
+    const fetchContacts = async () => {
+      const demoUser = getDemoUser();
+      if (!demoUser) {
+        setContacts([]);
+        setContactsLoading(false);
+        return;
       }
-    });
 
-    // Create conversation entries for all patients (with messages if they exist)
-    const conversationList = patients.map((patient) => {
-      const data = conversationMap.get(patient.id);
-
-      if (data) {
-        // Patient has messages
-        return {
-          patientId: patient.id,
-          patient,
-          lastMessage: data.lastMessage,
-          unread: data.unread,
-          lastMessageTime: formatMessageTime(data.lastMessage.created_at),
-        };
-      } else {
-        // Patient has no messages yet
-        return {
-          patientId: patient.id,
-          patient,
-          lastMessage: null,
-          unread: false,
-          lastMessageTime: '',
-        };
+      try {
+        if (demoUser.role === 'doctor') {
+          // Doctor sees their patients
+          const patients = await getDoctorPatients(demoUser.id);
+          setContacts(
+            patients.map(p => ({
+              id: p.id,
+              name: p.name,
+              role: 'patient' as const,
+            }))
+          );
+        } else {
+          // Patient sees their doctor
+          const doctor = await getPatientDoctor(demoUser.id);
+          if (doctor) {
+            setContacts([
+              {
+                id: doctor.id,
+                name: doctor.name,
+                role: 'doctor',
+              },
+            ]);
+          } else {
+            setContacts([]);
+          }
+        }
+      } catch (e) {
+        console.error('[Messages] Error fetching contacts:', e);
+        setContacts([]);
+      } finally {
+        setContactsLoading(false);
       }
-    });
+    };
 
-    // Sort: conversations with messages first (by most recent), then patients without messages
-    return conversationList.sort((a, b) => {
+    fetchContacts();
+  }, []);
+
+  // Get conversation with selected contact (Oldest to Newest for display)
+  const selectedConversation = useMemo(() => {
+    return selectedContactId ? getConversation(selectedContactId).slice().reverse() : [];
+  }, [selectedContactId, messages, getConversation]);
+
+  // Mark as read when contact selected
+  useEffect(() => {
+    if (selectedContactId) {
+      markAsRead(selectedContactId);
+    }
+  }, [selectedContactId, messages, markAsRead]);
+
+  // Build conversation list with last message info
+  const conversationList = useMemo(() => {
+    const demoUser = getDemoUser();
+    if (!demoUser) return [];
+
+    return contacts.map(contact => {
+      // Find last message with this contact
+      const contactMessages = messages.filter(
+        msg =>
+          (msg.from_user === demoUser.id && msg.to_user === contact.id) ||
+          (msg.from_user === contact.id && msg.to_user === demoUser.id)
+      );
+
+      const sortedMsgs = contactMessages.sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
+      const lastMessage = sortedMsgs[0] || null;
+      const unreadCount = contactMessages.filter(
+        m => m.from_user === contact.id && m.to_user === demoUser.id && !m.read_at
+      ).length;
+
+      return {
+        contact,
+        lastMessage,
+        unread: unreadCount > 0,
+        lastMessageTime: lastMessage ? formatMessageTime(lastMessage.created_at) : '',
+      };
+    }).sort((a, b) => {
+      // Sort: conversations with messages first, then by most recent
       if (a.lastMessage && b.lastMessage) {
         return new Date(b.lastMessage.created_at).getTime() - new Date(a.lastMessage.created_at).getTime();
       }
       if (a.lastMessage) return -1;
       if (b.lastMessage) return 1;
-      return a.patient.full_name.localeCompare(b.patient.full_name);
+      return a.contact.name.localeCompare(b.contact.name);
     });
-  }, [messages, patientsData, patientsLoading, user?.id]);
+  }, [contacts, messages]);
 
-  // Filter conversations by search
-  const filteredConversations = conversations.filter((conv) =>
-    conv.patient.full_name.toLowerCase().includes(searchTerm.toLowerCase())
+  // Filter by search
+  const filteredConversations = conversationList.filter(conv =>
+    conv.contact.name.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  // Get selected conversation data
-  const selectedPatient = filteredConversations.find((c) => c.patientId === selectedPatientId)?.patient;
+  // Get selected contact
+  const selectedContact = contacts.find(c => c.id === selectedContactId);
 
-  // Auto-select first conversation
+  // Auto-select first conversation if no selection and no URL param
   useEffect(() => {
-    if (!selectedPatientId && filteredConversations.length > 0) {
-      setSelectedPatientId(filteredConversations[0].patientId);
+    if (!selectedContactId && !initialContactId && filteredConversations.length > 0) {
+      setSelectedContactId(filteredConversations[0].contact.id);
+    } else if (initialContactId && !selectedContactId && filteredConversations.some(c => c.contact.id === initialContactId)) {
+      // Check if the contact is actually in the list, if so select it (redundant if initialized via state, but good for updates)
+      setSelectedContactId(initialContactId);
     }
-  }, [filteredConversations, selectedPatientId]);
+  }, [filteredConversations, selectedContactId, initialContactId]);
 
-  // Auto-scroll to bottom only when a new message is added
+  // Auto-scroll to bottom when new messages
   const prevMessageCount = useRef(selectedConversation.length);
   useEffect(() => {
     if (selectedConversation.length > prevMessageCount.current) {
@@ -157,12 +180,17 @@ const Messages = () => {
     prevMessageCount.current = selectedConversation.length;
   }, [selectedConversation]);
 
-  const handleSendMessage = (e: React.FormEvent) => {
+  const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMessage.trim() || !selectedPatientId) return;
-    sendMessage(selectedPatientId, newMessage.trim());
+    if (!newMessage.trim() || !selectedContactId || sending) return;
+
+    setSending(true);
+    await sendMessage(selectedContactId, newMessage.trim());
     setNewMessage('');
+    setSending(false);
   };
+
+  const demoUser = getDemoUser();
 
   return (
     <MainLayout title="Messages">
@@ -175,7 +203,7 @@ const Messages = () => {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
               <input
                 type="text"
-                placeholder="Search patients..."
+                placeholder={`Search ${demoUser?.role === 'doctor' ? 'patients' : 'doctors'}...`}
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="w-full pl-10 pr-4 py-3 bg-card border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
@@ -185,20 +213,20 @@ const Messages = () => {
 
           {/* Conversations */}
           <div className="flex-1 overflow-y-auto scrollbar-thin">
-            {filteredConversations.length === 0 && patientsLoading ? (
+            {contactsLoading || messagesLoading ? (
               <div className="flex items-center justify-center py-8">
                 <Loader2 className="w-6 h-6 animate-spin text-primary" />
               </div>
             ) : filteredConversations.length === 0 ? (
               <div className="p-4 text-center text-muted-foreground">
-                {searchTerm ? 'No conversations found' : 'No conversations yet'}
+                {searchTerm ? 'No conversations found' : 'No contacts yet'}
               </div>
             ) : (
               filteredConversations.map((conv) => (
                 <div
-                  key={conv.patientId}
-                  onClick={() => setSelectedPatientId(conv.patientId)}
-                  className={`flex items-center gap-3 p-4 cursor-pointer transition-colors ${selectedPatientId === conv.patientId ? 'bg-secondary' : 'hover:bg-secondary/50'
+                  key={conv.contact.id}
+                  onClick={() => setSelectedContactId(conv.contact.id)}
+                  className={`flex items-center gap-3 p-4 cursor-pointer transition-colors ${selectedContactId === conv.contact.id ? 'bg-secondary' : 'hover:bg-secondary/50'
                     }`}
                 >
                   <div className="relative">
@@ -211,7 +239,7 @@ const Messages = () => {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between mb-1">
-                      <p className="font-medium text-foreground truncate">{conv.patient.full_name}</p>
+                      <p className="font-medium text-foreground truncate">{conv.contact.name}</p>
                       <span className="text-xs text-muted-foreground flex-shrink-0 ml-2">
                         {conv.lastMessageTime}
                       </span>
@@ -219,7 +247,7 @@ const Messages = () => {
                     <p className="text-sm text-muted-foreground truncate">
                       {conv.lastMessage ? (
                         <>
-                          {conv.lastMessage.from_user === user?.id ? 'You: ' : ''}
+                          {conv.lastMessage.from_user === demoUser?.id ? 'You: ' : ''}
                           {conv.lastMessage.text}
                         </>
                       ) : (
@@ -235,7 +263,7 @@ const Messages = () => {
 
         {/* Chat Area */}
         <div className="flex-1 flex flex-col">
-          {selectedPatientId && selectedPatient ? (
+          {selectedContactId && selectedContact ? (
             <>
               {/* Chat Header */}
               <div className="flex items-center justify-between p-4 border-b border-border">
@@ -244,8 +272,8 @@ const Messages = () => {
                     <User className="w-6 h-6 text-primary" />
                   </div>
                   <div>
-                    <p className="font-medium text-foreground">{selectedPatient.full_name}</p>
-                    <p className="text-sm text-muted-foreground">{selectedPatient.condition || 'Patient'}</p>
+                    <p className="font-medium text-foreground">{selectedContact.name}</p>
+                    <p className="text-sm text-muted-foreground capitalize">{selectedContact.role}</p>
                   </div>
                 </div>
               </div>
@@ -258,57 +286,50 @@ const Messages = () => {
                   </div>
                 ) : (
                   <>
-                    {selectedConversation
-                      .map((msg, index, arr) => {
-                        const prevMsg = index > 0 ? arr[index - 1] : null;
-                        const showDate =
-                          !prevMsg ||
-                          formatMessageDate(msg.created_at) !== formatMessageDate(prevMsg.created_at);
+                    {selectedConversation.map((msg, index, arr) => {
+                      const prevMsg = index > 0 ? arr[index - 1] : null;
+                      const showDate =
+                        !prevMsg ||
+                        formatMessageDate(msg.created_at) !== formatMessageDate(prevMsg.created_at);
 
-                        const isFromCurrentUser = msg.from_user === user?.id;
+                      const isFromCurrentUser = msg.from_user === demoUser?.id;
 
-                        return (
-                          <div key={msg.id}>
-                            {showDate && (
-                              <div className="flex items-center gap-4 my-6">
-                                <div className="flex-1 h-px bg-border" />
-                                <span className="text-xs text-muted-foreground">
-                                  {formatMessageDate(msg.created_at)}
-                                </span>
-                                <div className="flex-1 h-px bg-border" />
+                      return (
+                        <div key={msg.id}>
+                          {showDate && (
+                            <div className="flex items-center gap-4 my-6">
+                              <div className="flex-1 h-px bg-border" />
+                              <span className="text-xs text-muted-foreground">
+                                {formatMessageDate(msg.created_at)}
+                              </span>
+                              <div className="flex-1 h-px bg-border" />
+                            </div>
+                          )}
+
+                          <div className={`flex ${isFromCurrentUser ? 'justify-end' : 'justify-start'}`}>
+                            <div className={`flex gap-2 max-w-[85%] ${isFromCurrentUser ? 'flex-row-reverse' : ''}`}>
+                              <div className="w-8 h-8 md:w-10 md:h-10 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0">
+                                <User className="w-4 h-4 md:w-5 md:h-5 text-primary" />
                               </div>
-                            )}
-
-                            <div
-                              className={`flex ${isFromCurrentUser ? 'justify-end' : 'justify-start'}`}
-                            >
-                              <div
-                                className={`flex gap-2 max-w-[85%] ${isFromCurrentUser ? 'flex-row-reverse' : ''}`}
-                              >
-                                <div className="w-8 h-8 md:w-10 md:h-10 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0">
-                                  <User className="w-4 h-4 md:w-5 md:h-5 text-primary" />
+                              <div className={`min-w-0 flex flex-col ${isFromCurrentUser ? 'items-end' : 'items-start'}`}>
+                                <div
+                                  className={`message-bubble ${isFromCurrentUser ? 'message-bubble-outgoing' : 'message-bubble-incoming'
+                                    } w-fit max-w-full`}
+                                >
+                                  <p className="whitespace-pre-wrap break-words">{msg.text}</p>
                                 </div>
-                                <div className={`min-w-0 flex flex-col ${isFromCurrentUser ? 'items-end' : 'items-start'}`}>
-                                  <div
-                                    className={`message-bubble ${isFromCurrentUser
-                                      ? 'message-bubble-outgoing'
-                                      : 'message-bubble-incoming'
-                                      } w-fit max-w-full`}
-                                  >
-                                    <p className="whitespace-pre-wrap break-words">{msg.text}</p>
-                                  </div>
-                                  <span className={`text-xs text-muted-foreground mt-1 block ${isFromCurrentUser ? 'text-right' : 'text-left'}`}>
-                                    {new Date(msg.created_at).toLocaleTimeString([], {
-                                      hour: '2-digit',
-                                      minute: '2-digit',
-                                    })}
-                                  </span>
-                                </div>
+                                <span className={`text-xs text-muted-foreground mt-1 block ${isFromCurrentUser ? 'text-right' : 'text-left'}`}>
+                                  {new Date(msg.created_at).toLocaleTimeString([], {
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                  })}
+                                </span>
                               </div>
                             </div>
                           </div>
-                        );
-                      })}
+                        </div>
+                      );
+                    })}
                     <div ref={messagesEndRef} />
                   </>
                 )}
@@ -330,14 +351,15 @@ const Messages = () => {
                         }
                       }}
                       className="w-full px-4 py-3 bg-card border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                      disabled={sending}
                     />
                   </div>
-                  <Button
-                    type="submit"
-                    disabled={!newMessage.trim()}
-                    className="w-12 h-12 p-0"
-                  >
-                    <Send className="w-5 h-5" />
+                  <Button type="submit" disabled={!newMessage.trim() || sending} className="w-12 h-12 p-0">
+                    {sending ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <Send className="w-5 h-5" />
+                    )}
                   </Button>
                 </form>
               </div>

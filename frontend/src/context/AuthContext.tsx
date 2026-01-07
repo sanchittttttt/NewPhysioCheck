@@ -1,21 +1,18 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { DemoUser, getDemoUser, setDemoUser, logoutDemoUser } from '@/lib/demoAuth';
 
-// DUMMY AUTH TYPES
+// Re-export DemoUser as AuthUser for compatibility
+export type AuthUser = DemoUser;
 export type Role = 'doctor' | 'patient';
-
-export interface AuthUser {
-  id: string;
-  name: string;
-  role: Role;
-  email: string;
-}
 
 interface AuthContextType {
   user: AuthUser | null;
+  loading: boolean;
+  login: (user: AuthUser) => void;
+  logout: () => void;
+  // Legacy compatibility
   loginAsDoctor: () => void;
   loginAsPatient: () => void;
-  logout: () => void;
-  loading: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -24,59 +21,57 @@ interface AuthProviderProps {
   children: ReactNode;
 }
 
-const STORAGE_KEY = 'physiocheck_dummy_user';
-
 export function AuthProvider({ children }: AuthProviderProps) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Initialize from localStorage
+  // Initialize from localStorage on mount
   useEffect(() => {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      try {
-        setUser(JSON.parse(stored));
-      } catch (e) {
-        console.error('Failed to parse dummy user', e);
-        localStorage.removeItem(STORAGE_KEY);
-      }
+    const storedUser = getDemoUser();
+    if (storedUser) {
+      setUser(storedUser);
     }
     setLoading(false);
   }, []);
 
+  const login = (demoUser: AuthUser) => {
+    setDemoUser(demoUser);
+    setUser(demoUser);
+  };
+
+  const logout = () => {
+    logoutDemoUser();
+    setUser(null);
+  };
+
+  // Legacy compatibility for components that use these
   const loginAsDoctor = () => {
     const doctorUser: AuthUser = {
-      id: 'doctor-1',
-      name: 'Demo Doctor',
+      id: 'demo-doctor-001',
+      name: 'Dr. Sarah Chen',
+      email: 'doctor@demo.physiocheck.com',
       role: 'doctor',
-      email: 'doctor@demo.com'
     };
-    setUser(doctorUser);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(doctorUser));
+    login(doctorUser);
   };
 
   const loginAsPatient = () => {
     const patientUser: AuthUser = {
-      id: 'patient-1',
-      name: 'Demo Patient',
+      id: 'demo-patient-001',
+      name: 'John Smith',
+      email: 'patient1@demo.physiocheck.com',
       role: 'patient',
-      email: 'patient@demo.com'
     };
-    setUser(patientUser);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(patientUser));
-  };
-
-  const logout = () => {
-    setUser(null);
-    localStorage.removeItem(STORAGE_KEY);
+    login(patientUser);
   };
 
   const value: AuthContextType = {
     user,
+    loading,
+    login,
+    logout,
     loginAsDoctor,
     loginAsPatient,
-    logout,
-    loading,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
@@ -89,6 +84,3 @@ export function useAuth(): AuthContextType {
   }
   return context;
 }
-
-
-

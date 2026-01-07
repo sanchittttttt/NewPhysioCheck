@@ -1,141 +1,127 @@
 /**
- * Patient service - Supabase implementation
+ * Patient Service - Supabase Implementation
+ * 
+ * Handles all patient-related database operations.
+ * Uses demo_users table with role='patient' for patient data.
  */
 import { supabase } from '@/lib/supabaseClient';
-import type {
-  Patient,
-  PatientListResponse,
-  PatientCreate,
-  PatientUpdate,
-  PatientListParams,
-} from '@/types/api';
+import { getDemoUser, getDoctorPatients, DemoUser } from '@/lib/demoAuth';
 
-export const patientService = {
-  /**
-    * Get paginated list of patients with optional filters
-   */
-  async getAll(params?: PatientListParams): Promise<PatientListResponse> {
-    let query = supabase
-      .from('patients')
-      .select('*', { count: 'exact' });
+// Patient type (extends DemoUser with additional fields)
+export interface Patient extends DemoUser {
+  condition?: string;
+  status?: 'active' | 'on_hold' | 'discharged';
+  notes?: string;
+  date_of_birth?: string;
+  // Computed/joined fields
+  lastSession?: string;
+  adherence?: number;
+}
 
-    // Apply status filter
-    if (params?.status_filter) {
-      query = query.eq('status', params.status_filter);
+export interface GetPatientsOptions {
+  limit?: number;
+  offset?: number;
+  status?: string;
+  search?: string;
+}
+
+/**
+ * Get all patients for the current doctor
+ */
+export async function getPatients(options: GetPatientsOptions = {}): Promise<{ data: Patient[]; error: any }> {
+  const user = getDemoUser();
+  if (!user || user.role !== 'doctor') {
+    return { data: [], error: 'Not logged in as doctor' };
+  }
+
+  try {
+    // Get patients linked to this doctor
+    const patients = await getDoctorPatients(user.id);
+
+    // Apply search filter if provided
+    let filtered = patients as Patient[];
+    if (options.search) {
+      const search = options.search.toLowerCase();
+      filtered = filtered.filter(p =>
+        p.name.toLowerCase().includes(search) ||
+        p.email.toLowerCase().includes(search)
+      );
     }
 
-    // Apply search filter
-    if (params?.search) {
-      const search = params.search;
-      query = query.or(`full_name.ilike.%${search}%,condition.ilike.%${search}%`);
+    // Apply limit
+    if (options.limit) {
+      filtered = filtered.slice(0, options.limit);
     }
 
-    // Pagination
-    const skip = params?.skip || 0;
-    const limit = params?.limit || 100;
+    return { data: filtered, error: null };
+  } catch (e) {
+    console.error('[PatientService] getPatients error:', e);
+    return { data: [], error: e };
+  }
+}
 
-    // range is inclusive
-    query = query.range(skip, skip + limit - 1);
-
-    // Order by created_at desc by default
-    query = query.order('created_at', { ascending: false });
-
-    const { data, error, count } = await query;
-
-    if (error) throw error;
-
-    // TODO: Add session counts via join or separate query if needed
-    // For now we map strictly to table columns, optional fields will be undefined
-    const patients = (data || []).map(p => ({
-      ...p,
-      // Ensure nullable fields are handled if types mismatch slightly
-      date_of_birth: p.date_of_birth || null,
-      condition: p.condition || null,
-      notes: p.notes || null,
-    })) as Patient[];
-
-    return {
-      data: patients,
-      total: count || 0,
-      skip,
-      limit
-    };
-  },
-
-  /**
-   * Get single patient by ID
-   */
-  async getById(id: string): Promise<Patient> {
+/**
+ * Get a single patient by ID
+ */
+export async function getPatientById(id: string): Promise<{ data: Patient | null; error: any }> {
+  try {
     const { data, error } = await supabase
-      .from('patients')
+      .from('demo_users')
       .select('*')
       .eq('id', id)
+      .eq('role', 'patient')
       .single();
 
-    if (error) throw error;
-    return data as Patient;
-  },
-
-  /**
-   * Create a new patient
-   */
-  async create(data: PatientCreate): Promise<Patient> {
-    // If doctor_id is not provided, we should probably get it from session, 
-    // but typically service just sends what it's given. 
-    // The RLS policy should ideally enforce doctor_id = auth.uid() or validation here.
-
-    // If doctor_id missing, we try to get current user
-    let doctorId = data.doctor_id;
-    if (!doctorId) {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session) doctorId = session.user.id;
+    if (error) {
+      return { data: null, error };
     }
 
-    if (!doctorId) throw new Error("Doctor ID required");
+    return { data: data as Patient, error: null };
+  } catch (e) {
+    console.error('[PatientService] getPatientById error:', e);
+    return { data: null, error: e };
+  }
+}
 
-    const { data: newPatient, error } = await supabase
-      .from('patients')
-      .insert({
-        doctor_id: doctorId,
-        full_name: data.full_name,
-        date_of_birth: data.date_of_birth,
-        condition: data.condition,
-        status: data.status || 'active',
-        notes: data.notes,
-      })
-      .select()
-      .single();
+/**
+ * Get patient stats (sessions, adherence, etc.)
+ */
+export async function getPatientStats(patientId: string): Promise<{
+  totalSessions: number;
+  completedSessions: number;
+  adherence: number;
+  lastSessionDate: string | null;
+}> {
+  try {
+    const { data: sessions, error } = await supabase
+      .from('sessions')
+      .select('id, status, started_at')
+      .eq('patient_id', patientId);
 
-    if (error) throw error;
-    return newPatient as Patient;
-  },
+    if (error || !sessions) {
+      return { totalSessions: 0, completedSessions: 0, adherence: 0, lastSessionDate: null };
+    }
 
-  /**
-   * Update a patient
-   */
-  async update(id: string, data: PatientUpdate): Promise<Patient> {
-    const { data: updated, error } = await supabase
-      .from('patients')
-      .update(data)
-      .eq('id', id)
-      .select()
-      .single();
+    const total = sessions.length;
+    const completed = sessions.filter(s => s.status === 'completed').length;
+    const adherence = total > 0 ? Math.round((completed / total) * 100) : 0;
 
-    if (error) throw error;
-    return updated as Patient;
-  },
+    // Get most recent session
+    const sorted = sessions.sort((a, b) =>
+      new Date(b.started_at || 0).getTime() - new Date(a.started_at || 0).getTime()
+    );
+    const lastSessionDate = sorted[0]?.started_at || null;
 
-  /**
-   * Delete a patient
-   */
-  async delete(id: string): Promise<void> {
-    const { error } = await supabase
-      .from('patients')
-      .delete()
-      .eq('id', id);
+    return { totalSessions: total, completedSessions: completed, adherence, lastSessionDate };
+  } catch (e) {
+    console.error('[PatientService] getPatientStats error:', e);
+    return { totalSessions: 0, completedSessions: 0, adherence: 0, lastSessionDate: null };
+  }
+}
 
-    if (error) throw error;
-  },
+// Backward compatible export
+export const patientService = {
+  getAll: async (options: GetPatientsOptions = {}) => getPatients(options),
+  getById: async (id: string) => getPatientById(id),
+  getStats: getPatientStats,
 };
-
-

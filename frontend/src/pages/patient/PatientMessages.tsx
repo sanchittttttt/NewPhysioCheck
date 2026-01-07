@@ -6,6 +6,7 @@ import { PatientLayout } from '@/components/layout/PatientLayout';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
+import { getPatientDoctor, DemoUser } from '@/lib/demoAuth';
 
 export default function PatientMessages() {
   const { user } = useAuth();
@@ -13,10 +14,28 @@ export default function PatientMessages() {
   const { messages, sendMessage, getConversation, markAsRead } = useMessages();
   const [newMessage, setNewMessage] = useState('');
   const [showChat, setShowChat] = useState(true);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // For hackathon: patients are assigned to 'doctor-1' by default
-  const doctorId = 'doctor-1';
+  const [doctor, setDoctor] = useState<DemoUser | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchDoctor = async () => {
+      if (!user) return;
+      try {
+        const doc = await getPatientDoctor(user.id);
+        setDoctor(doc);
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchDoctor();
+  }, [user]);
+
+  const doctorId = doctor?.id;
 
   const conversationView = useMemo(() => {
     return getConversation(doctorId);
@@ -52,7 +71,8 @@ export default function PatientMessages() {
 
   const formatMessageTime = (dateString: string) => {
     try {
-      return new Date(dateString).toLocaleTimeString([], {
+      const date = new Date(dateString);
+      return date.toLocaleTimeString([], {
         hour: '2-digit',
         minute: '2-digit',
       });
@@ -75,6 +95,16 @@ export default function PatientMessages() {
       return '';
     }
   };
+
+  if (loading) {
+    return (
+      <PatientLayout title="Messages" subtitle="Chat with your physiotherapist">
+        <div className="flex justify-center py-12">
+          <Loader2 className="w-8 h-8 animate-spin text-primary" />
+        </div>
+      </PatientLayout>
+    );
+  }
 
   if (!doctorId) {
     return (

@@ -1,13 +1,27 @@
 import { useState, useEffect, MouseEvent } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { MainLayout } from '@/components/layout/MainLayout';
-import { patientService } from '@/lib/services/patientService';
 import { CreatePatientDialog } from '@/components/patient/CreatePatientDialog';
 import { Search, ChevronDown, User, FileText, Plus, Loader2, MessageCircle, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import { useNavigate } from 'react-router-dom';
+import { getDemoUser, getDoctorPatients, DemoUser } from '@/lib/demoAuth';
+import { supabase } from '@/lib/supabaseClient';
 import type { Patient } from '@/types/api';
+
+// Extend DemoUser to Patient type
+interface PatientWithStats extends DemoUser {
+  condition?: string;
+  status: 'active' | 'on_hold' | 'discharged';
+  date_of_birth?: string | null;
+  notes?: string | null;
+  created_at: string;
+  total_sessions?: number;
+  missed_sessions?: number;
+  full_name: string;
+  doctor_id: string;
+}
 
 const Patients = () => {
   const [searchTerm, setSearchTerm] = useState('');
@@ -20,52 +34,60 @@ const Patients = () => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  // Debounced search - update query after user stops typing
+  // Debounced search
   const [debouncedSearch, setDebouncedSearch] = useState(searchTerm);
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedSearch(searchTerm);
-      setCurrentPage(1); // Reset to first page on search
+      setCurrentPage(1);
     }, 300);
     return () => clearTimeout(timer);
   }, [searchTerm]);
 
-  // DUMMY DATA FOR DEVELOPMENT
-  const DUMMY_PATIENTS: Patient[] = [
-    {
-      id: 'patient-1',
-      doctor_id: 'doctor-1',
-      full_name: 'Demo Patient',
-      date_of_birth: '1990-01-01',
-      condition: 'ACL Reconstruction',
-      status: 'active',
-      notes: 'Recovering well',
-      created_at: new Date().toISOString(),
-      total_sessions: 12,
-      missed_sessions: 1,
-    },
-    {
-      id: 'patient-2',
-      doctor_id: 'doctor-1',
-      full_name: 'John Doe',
-      date_of_birth: '1985-05-15',
-      condition: 'Rotator Cuff Repair',
-      status: 'on_hold',
-      notes: 'Traveling',
-      created_at: new Date().toISOString(),
-      total_sessions: 5,
-      missed_sessions: 0,
-    }
-  ];
-
-  // Fetch patients with filters from backend API (DUMMY MODE)
+  // Fetch patients from Supabase
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['patients', currentPage, statusFilter, debouncedSearch],
     queryFn: async () => {
-      // Simulate network delay
-      await new Promise(resolve => setTimeout(resolve, 500));
+      const user = getDemoUser();
+      if (!user || user.role !== 'doctor') {
+        return { data: [], total: 0 };
+      }
 
-      let filtered = [...DUMMY_PATIENTS];
+      // Get patients linked to this doctor
+      const doctorPatients = await getDoctorPatients(user.id);
+
+      // Get session stats for each patient
+      const patientsWithStats: PatientWithStats[] = await Promise.all(
+        doctorPatients.map(async (p) => {
+          // Get session counts
+          const { count: totalCount } = await supabase
+            .from('sessions')
+            .select('*', { count: 'exact', head: true })
+            .eq('patient_id', p.id);
+
+          const { count: missedCount } = await supabase
+            .from('sessions')
+            .select('*', { count: 'exact', head: true })
+            .eq('patient_id', p.id)
+            .eq('status', 'missed');
+
+          return {
+            ...p,
+            full_name: p.name,
+            doctor_id: user.id,
+            status: 'active' as const,
+            condition: 'Rehabilitation',
+            date_of_birth: null,
+            notes: null,
+            created_at: new Date().toISOString(),
+            total_sessions: totalCount || 0,
+            missed_sessions: missedCount || 0,
+          };
+        })
+      );
+
+      // Apply filters
+      let filtered = patientsWithStats;
 
       if (statusFilter !== 'all') {
         filtered = filtered.filter(p => p.status === statusFilter);
@@ -82,13 +104,9 @@ const Patients = () => {
       return {
         data: filtered,
         total: filtered.length,
-        skip: 0,
-        limit: itemsPerPage
       };
     },
   });
-
-
 
   useEffect(() => {
     if (error) {
@@ -100,40 +118,31 @@ const Patients = () => {
     }
   }, [error, toast]);
 
-  const patients: Patient[] = data?.data || [];
+  const patients = data?.data || [];
   const total = data?.total || 0;
   const totalPages = Math.ceil(total / itemsPerPage);
 
-
-
-  // Delete patient mutation (DUMMY MODE)
+  // Delete patient mutation (not implemented in demo)
   const deletePatientMutation = useMutation({
     mutationFn: async (patientId: string) => {
-      // Simulate delete
-      await new Promise(resolve => setTimeout(resolve, 500));
-      console.log('Dummy delete patient:', patientId);
+      console.log('Delete patient not implemented for demo:', patientId);
+      throw new Error('Cannot delete demo users');
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['patients'] });
+    onError: () => {
       toast({
-        title: 'Success',
-        description: 'Patient deleted successfully (Dummy Mode)',
-      });
-    },
-    onError: (error: any) => {
-      toast({
-        title: 'Error',
-        description: 'Failed to delete patient',
+        title: 'Not Available',
+        description: 'Deleting patients is not available in demo mode',
         variant: 'destructive',
       });
     },
   });
 
-  const handleDeletePatient = (patient: Patient, e: MouseEvent) => {
-    e.stopPropagation(); // Prevent row click
-    if (window.confirm(`Are you sure you want to delete ${patient.full_name}? This action cannot be undone.`)) {
-      deletePatientMutation.mutate(patient.id);
-    }
+  const handleDeletePatient = (patient: PatientWithStats, e: MouseEvent) => {
+    e.stopPropagation();
+    toast({
+      title: 'Demo Mode',
+      description: 'Deleting patients is disabled in demo mode',
+    });
   };
 
   const getStatusColor = (status: string) => {
@@ -251,7 +260,6 @@ const Patients = () => {
                     <th>Sessions</th>
                     <th>Missed</th>
                     <th>Age</th>
-                    <th>Created</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
@@ -265,7 +273,7 @@ const Patients = () => {
                           </div>
                           <div>
                             <p className="font-medium text-foreground">{patient.full_name}</p>
-                            <p className="text-sm text-muted-foreground">{patient.condition || 'No condition specified'}</p>
+                            <p className="text-sm text-muted-foreground">{patient.email}</p>
                           </div>
                         </div>
                       </td>
@@ -282,20 +290,13 @@ const Patients = () => {
                           {patient.missed_sessions || 0}
                         </span>
                       </td>
-                      <td className="text-muted-foreground">{calculateAge(patient.date_of_birth)}</td>
-                      <td className="text-muted-foreground">
-                        {formatDate(patient.created_at)}
-                      </td>
+                      <td className="text-muted-foreground">{calculateAge(patient.date_of_birth || null)}</td>
                       <td>
                         <div className="flex items-center gap-2">
                           <button
-                            onClick={() => {
-                              // Navigate to patient chat
+                            onClick={(e) => {
+                              e.stopPropagation();
                               navigate(`/messages?patientId=${patient.id}`);
-                              toast({
-                                title: 'Chat with Patient',
-                                description: `Opening chat with ${patient.full_name}`,
-                              });
                             }}
                             className="p-2 hover:bg-secondary rounded-lg transition-colors"
                             title="Message Patient"
@@ -303,16 +304,12 @@ const Patients = () => {
                             <MessageCircle className="w-4 h-4 text-muted-foreground" />
                           </button>
                           <button
-                            onClick={() => {
-                              // Navigate to patient protocols
+                            onClick={(e) => {
+                              e.stopPropagation();
                               navigate(`/sessions?patientId=${patient.id}`);
-                              toast({
-                                title: 'Patient Protocols',
-                                description: `View protocols for ${patient.full_name}`,
-                              });
                             }}
                             className="p-2 hover:bg-secondary rounded-lg transition-colors"
-                            title="View Protocols"
+                            title="View Sessions"
                           >
                             <FileText className="w-4 h-4 text-muted-foreground" />
                           </button>
@@ -350,32 +347,6 @@ const Patients = () => {
                     >
                       Previous
                     </Button>
-                    {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                      let pageNum;
-                      if (totalPages <= 5) {
-                        pageNum = i + 1;
-                      } else if (currentPage <= 3) {
-                        pageNum = i + 1;
-                      } else if (currentPage >= totalPages - 2) {
-                        pageNum = totalPages - 4 + i;
-                      } else {
-                        pageNum = currentPage - 2 + i;
-                      }
-                      return (
-                        <Button
-                          key={pageNum}
-                          variant={currentPage === pageNum ? 'default' : 'ghost'}
-                          size="sm"
-                          className="w-8 h-8 p-0"
-                          onClick={() => setCurrentPage(pageNum)}
-                        >
-                          {pageNum}
-                        </Button>
-                      );
-                    })}
-                    {totalPages > 5 && currentPage < totalPages - 2 && (
-                      <span className="text-muted-foreground px-2">...</span>
-                    )}
                     <Button
                       variant="ghost"
                       size="sm"

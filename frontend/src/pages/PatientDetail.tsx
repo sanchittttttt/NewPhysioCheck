@@ -4,76 +4,79 @@ import { ArrowLeft, User, Calendar, FileText, MessageCircle, Loader2, Plus } fro
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import { ScheduleSessionDialog } from '@/components/doctor/ScheduleSessionDialog';
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { useSession } from '@/context/SessionContext';
 import { useProtocol } from '@/context/ProtocolContext';
-// Dummy types
-import type { Protocol } from '@/context/ProtocolContext';
-import type { Session } from '@/context/SessionContext';
-
-// Dummy Patient Type (simplified)
-interface Patient {
-  id: string;
-  full_name: string;
-  condition?: string;
-  status: string;
-  date_of_birth?: string;
-  created_at: string;
-  notes?: string;
-}
+import { supabase } from '@/lib/supabaseClient';
+import { DemoUser } from '@/lib/demoAuth';
+import type { Protocol } from '@/types/api';
 
 const PatientDetail = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { toast } = useToast();
   const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
+  const [patient, setPatient] = useState<DemoUser | null>(null);
+  const [patientLoading, setPatientLoading] = useState(true);
 
   const { sessions: allSessions } = useSession();
   const { protocols: allProtocols } = useProtocol();
 
-  // DUMMY PATIENTS LIST (Moving to a shared const would be better, but inline is fine for now)
-  const DUMMY_PATIENTS: Patient[] = [
-    {
-      id: 'patient-1',
-      full_name: 'Demo Patient',
-      condition: 'ACL Recovery',
-      status: 'active',
-      date_of_birth: '1990-01-01',
-      created_at: '2025-11-01T10:00:00Z',
-      notes: 'Patient is recovering well.'
-    },
-    {
-      id: 'patient-2',
-      full_name: 'John Doe',
-      condition: 'Shoulder Rehab',
-      status: 'active',
-      created_at: '2025-11-05T10:00:00Z'
-    }
-  ];
+  // Fetch patient from Supabase
+  useEffect(() => {
+    const fetchPatient = async () => {
+      if (!id) {
+        setPatientLoading(false);
+        return;
+      }
 
-  // Find patient
-  const patient = DUMMY_PATIENTS.find(p => p.id === id);
-  const patientLoading = false;
+      try {
+        const { data, error } = await supabase
+          .from('demo_users')
+          .select('*')
+          .eq('id', id)
+          .single();
+
+        if (error) {
+          console.error('[PatientDetail] Error fetching patient:', error);
+          setPatient(null);
+        } else {
+          setPatient(data as DemoUser);
+        }
+      } catch (e) {
+        console.error('[PatientDetail] Exception:', e);
+        setPatient(null);
+      } finally {
+        setPatientLoading(false);
+      }
+    };
+
+    fetchPatient();
+  }, [id]);
 
   // Filter sessions for this patient
   const sessions = useMemo(() => {
-    return allSessions.filter(s => s.patientId === id);
+    return allSessions.filter(s => s.patient_id === id);
   }, [allSessions, id]);
 
-  // Derive "assigned" protocols from sessions + just showing all protocols for demo if needed
-  // For now, let's show unique protocols found in sessions as "active" assignments
-  const assignments = useMemo(() => {
-    const protocolIds = new Set(sessions.map(s => s.protocolId));
-    // In a real app we'd have an assignments table. Here we fake it.
-    // If a patient has a session for a protocol, we consider it "assigned".
-    return Array.from(protocolIds).map(pid => ({
-      id: `assign-${pid}`,
-      protocol_id: pid,
-      patient_id: id,
-      status: 'active',
-      start_date: new Date().toISOString(), // fake date
-    }));
-  }, [sessions, id]);
+  // Get assignments from Supabase
+  const [assignments, setAssignments] = useState<any[]>([]);
+  useEffect(() => {
+    const fetchAssignments = async () => {
+      if (!id) return;
+
+      const { data, error } = await supabase
+        .from('assignments')
+        .select('*')
+        .eq('patient_id', id)
+        .order('created_at', { ascending: false });
+
+      if (!error && data) {
+        setAssignments(data);
+      }
+    };
+    fetchAssignments();
+  }, [id]);
 
   const protocolMap = useMemo(() => {
     const map = new Map<string, Protocol>();
@@ -148,7 +151,7 @@ const PatientDetail = () => {
   }
 
   return (
-    <MainLayout title={`Patient: ${patient.full_name}`}>
+    <MainLayout title={`Patient: ${patient.name}`}>
       <div className="space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between">
@@ -179,36 +182,27 @@ const PatientDetail = () => {
               <User className="w-8 h-8 text-primary" />
             </div>
             <div className="flex-1">
-              <h2 className="text-2xl font-semibold text-foreground mb-2">{patient.full_name}</h2>
+              <h2 className="text-2xl font-semibold text-foreground mb-2">{patient.name}</h2>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                 <div>
-                  <p className="text-muted-foreground">Condition</p>
-                  <p className="font-medium text-foreground">{patient.condition || 'N/A'}</p>
+                  <p className="text-muted-foreground">Email</p>
+                  <p className="font-medium text-foreground">{patient.email}</p>
                 </div>
                 <div>
-                  <p className="text-muted-foreground">Status</p>
-                  <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${getStatusColor(patient.status)}`} />
-                    <span className="font-medium text-foreground capitalize">{patient.status.replace('_', ' ')}</span>
-                  </div>
+                  <p className="text-muted-foreground">Role</p>
+                  <p className="font-medium text-foreground capitalize">{patient.role}</p>
                 </div>
                 <div>
-                  <p className="text-muted-foreground">Date of Birth</p>
+                  <p className="text-muted-foreground">Sessions</p>
+                  <p className="font-medium text-foreground">{sessions.length}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground">Completed</p>
                   <p className="font-medium text-foreground">
-                    {patient.date_of_birth ? formatDate(patient.date_of_birth) : 'N/A'}
+                    {sessions.filter(s => s.status === 'completed').length}
                   </p>
                 </div>
-                <div>
-                  <p className="text-muted-foreground">Created</p>
-                  <p className="font-medium text-foreground">{formatDate(patient.created_at)}</p>
-                </div>
               </div>
-              {patient.notes && (
-                <div className="mt-4 pt-4 border-t border-border">
-                  <p className="text-sm text-muted-foreground mb-1">Notes</p>
-                  <p className="text-sm text-foreground">{patient.notes}</p>
-                </div>
-              )}
             </div>
           </div>
         </div>
@@ -231,21 +225,21 @@ const PatientDetail = () => {
           </div>
 
           {assignments.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No protocols assigned yet</p>
+            <p className="text-sm text-muted-foreground">No protocols assigned yet. Create and assign a protocol to get started.</p>
           ) : (
             <div className="space-y-3">
               {assignments.map((assignment) => {
                 const protocol = protocolMap.get(assignment.protocol_id);
-                const assignmentSessions = sessions.filter(s => s.protocolId === assignment.protocol_id);
+                const assignmentSessions = sessions.filter(s => s.protocol_id === assignment.protocol_id);
                 const completed = assignmentSessions.filter(s => s.status === 'completed').length;
 
                 return (
                   <div key={assignment.id} className="bg-secondary/50 rounded-lg p-4 border border-border">
                     <div className="flex items-start justify-between mb-2">
                       <div className="flex-1">
-                        <h4 className="font-medium text-foreground">{protocol?.name || 'Unknown Protocol'}</h4>
+                        <h4 className="font-medium text-foreground">{protocol?.title || 'Unknown Protocol'}</h4>
                         <p className="text-sm text-muted-foreground mt-1">
-                          Started: {formatDate(assignment.start_date as string)}
+                          Started: {formatDate(assignment.start_date)}
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
@@ -280,7 +274,7 @@ const PatientDetail = () => {
           ) : (
             <div className="space-y-2">
               {sessions.slice(0, 10).map((session) => {
-                const protocol = protocolMap.get(session.protocolId);
+                const protocol = protocolMap.get(session.protocol_id);
                 const sessionDate = session.scheduled_date || (session.started_at ? session.started_at.split('T')[0] : '');
                 return (
                   <div
@@ -298,7 +292,7 @@ const PatientDetail = () => {
                         <span className={`w-2 h-2 rounded-full ${getStatusColor(session.status)}`} />
                         <span className="text-sm text-foreground capitalize">{session.status.replace('_', ' ')}</span>
                       </div>
-                      <p className="text-sm text-muted-foreground">{protocol?.name || 'Unknown Protocol'}</p>
+                      <p className="text-sm text-muted-foreground">{protocol?.title || 'Unknown Protocol'}</p>
                     </div>
                   </div>
                 );
@@ -319,5 +313,3 @@ const PatientDetail = () => {
 };
 
 export default PatientDetail;
-
-

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { useProtocol, Exercise } from '@/context/ProtocolContext';
 import { Search, GripVertical, Trash2, Loader2, Save, UserPlus, Plus } from 'lucide-react';
@@ -6,11 +6,12 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useToast } from '@/hooks/use-toast';
 import { useNavigate } from 'react-router-dom';
+import { getDemoUser, getDoctorPatients, DemoUser } from '@/lib/demoAuth';
+import { supabase } from '@/lib/supabaseClient';
 
 // UI-specific type combining Exercise details with ProtocolStep configuration
 interface UIProtocolExercise extends Exercise {
-  // Configurable fields for the protocol step
-  step_id: string; // Temporary ID for UI list management
+  step_id: string;
   sets: number;
   reps: number;
   duration_seconds: number | null;
@@ -21,7 +22,7 @@ interface UIProtocolExercise extends Exercise {
 const ProtocolBuilder = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { exercises, createProtocol } = useProtocol();
+  const { exercises, createProtocol, loading: exercisesLoading } = useProtocol();
 
   // Local state for the builder
   const [builderExercises, setBuilderExercises] = useState<UIProtocolExercise[]>([]);
@@ -29,6 +30,23 @@ const ProtocolBuilder = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedPatientId, setSelectedPatientId] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Patients from Supabase
+  const [patients, setPatients] = useState<DemoUser[]>([]);
+  const [patientsLoading, setPatientsLoading] = useState(true);
+
+  // Fetch patients on mount
+  useEffect(() => {
+    const fetchPatients = async () => {
+      const user = getDemoUser();
+      if (user?.role === 'doctor') {
+        const doctorPatients = await getDoctorPatients(user.id);
+        setPatients(doctorPatients);
+      }
+      setPatientsLoading(false);
+    };
+    fetchPatients();
+  }, []);
 
   // Filter exercises
   const filteredExercises = exercises.filter((exercise) =>
@@ -57,9 +75,6 @@ const ProtocolBuilder = () => {
 
     setIsSubmitting(true);
 
-    // Simulate async delay
-    await new Promise(resolve => setTimeout(resolve, 600));
-
     try {
       // Map UI exercises to context format (ProtocolStep)
       const protocolInput = builderExercises.map(ex => ({
@@ -72,29 +87,65 @@ const ProtocolBuilder = () => {
         notes: null
       }));
 
-      createProtocol({
+      // Create protocol (saves to Supabase)
+      const newProtocol = await createProtocol({
         title: protocolName,
         steps: protocolInput
       });
+
+      if (!newProtocol) {
+        throw new Error('Failed to create protocol');
+      }
 
       toast({
         title: "Success",
         description: isDraft ? 'Protocol saved as draft' : 'Protocol created successfully',
       });
 
-      if (!isDraft && selectedPatientId) {
-        // Dummy assignment
-        console.log(`ASSIGNMENT_CREATED: Protocol assigned to patient ${selectedPatientId}`);
-        toast({
-          title: "Assignment Created",
-          description: "Dummy assignment created. Check console logs.",
-        });
-        navigate('/patients');
+      // If a patient is selected and not draft, create an assignment
+      if (!isDraft && selectedPatientId && newProtocol) {
+        const user = getDemoUser();
+
+        // Create assignment in Supabase
+        const { data: assignment, error: assignmentError } = await supabase
+          .from('assignments')
+          .insert({
+            patient_id: selectedPatientId,
+            protocol_id: newProtocol.id,
+            doctor_id: user?.id,
+            start_date: new Date().toISOString().split('T')[0],
+            frequency_per_week: 3,
+            status: 'active',
+          } as any)
+          .select()
+          .single();
+
+        if (assignmentError) {
+          console.error('[ProtocolBuilder] Assignment error:', assignmentError);
+          toast({
+            title: "Warning",
+            description: "Protocol created but assignment failed. Try assigning from patient page.",
+            variant: "default"
+          });
+        } else {
+          console.log('[ProtocolBuilder] Assignment created:', assignment?.id);
+          toast({
+            title: "Assignment Created",
+            description: `Protocol assigned to patient successfully!`,
+          });
+        }
+
+        navigate(`/patients/${selectedPatientId}`);
       } else {
-        // Reset form
+        // Reset form for draft
         setBuilderExercises([]);
         setProtocolName('');
         setSelectedPatientId('');
+
+        toast({
+          title: "Saved",
+          description: "Protocol saved. You can assign it to patients later.",
+        });
       }
 
     } catch (error) {
@@ -110,14 +161,13 @@ const ProtocolBuilder = () => {
   };
 
   const addToProtocol = (exercise: Exercise) => {
-    // Check if already added
     if (builderExercises.find(e => e.id === exercise.id)) return;
 
     setBuilderExercises([
       ...builderExercises,
       {
         ...exercise,
-        step_id: crypto.randomUUID(), // Temp UI ID
+        step_id: crypto.randomUUID(),
         sets: 3,
         reps: 10,
         duration_seconds: null,
@@ -134,12 +184,6 @@ const ProtocolBuilder = () => {
   const updateExercise = (stepId: string, updates: Partial<UIProtocolExercise>) => {
     setBuilderExercises(builderExercises.map((ex) => (ex.step_id === stepId ? { ...ex, ...updates } : ex)));
   };
-
-  // DUMMY PATIENTS for dropdown
-  const DUMMY_PATIENTS = [
-    { id: 'patient-1', full_name: 'Demo Patient' },
-    { id: 'patient-2', full_name: 'John Doe' }
-  ];
 
   return (
     <MainLayout title="Protocol Builder" subtitle="Select exercises to build a new protocol.">
@@ -159,51 +203,58 @@ const ProtocolBuilder = () => {
           </div>
 
           {/* Exercise Grid */}
-          <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
-            {filteredExercises.map((exercise) => (
-              <div key={exercise.id} className="exercise-card group">
-                <div className="relative aspect-square overflow-hidden bg-secondary/30 flex items-center justify-center p-4">
-                  {exercise.image_url ? (
-                    <div className="w-full h-full rounded-full overflow-hidden border-2 border-primary/20 bg-background/50">
-                      <img
-                        src={exercise.image_url}
-                        alt={exercise.name}
-                        className="w-full h-full object-cover scale-[1.55] translate-y-[2%] group-hover:scale-[1.65] transition-transform duration-500"
-                      />
-                    </div>
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center text-muted-foreground">
-                      <span className="text-sm">No Image</span>
-                    </div>
-                  )}
-                  <button
-                    onClick={() => addToProtocol(exercise)}
-                    disabled={!!builderExercises.find((e) => e.id === exercise.id)}
-                    className="absolute top-3 right-3 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <Plus className="w-5 h-5" />
-                  </button>
-                </div>
-                <div className="p-4">
-                  <h3 className="font-medium text-foreground mb-2">{exercise.name}</h3>
-                  <div className="flex flex-wrap gap-1">
-                    {exercise.joint && (
-                      <span className="px-2 py-1 rounded-md bg-secondary text-muted-foreground text-xs">
-                        {exercise.joint}
-                      </span>
+          {exercisesLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="w-8 h-8 animate-spin text-primary" />
+              <span className="ml-3 text-muted-foreground">Loading exercises...</span>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
+              {filteredExercises.map((exercise) => (
+                <div key={exercise.id} className="exercise-card group">
+                  <div className="relative aspect-square overflow-hidden bg-secondary/30 flex items-center justify-center p-4">
+                    {exercise.image_url ? (
+                      <div className="w-full h-full rounded-full overflow-hidden border-2 border-primary/20 bg-background/50">
+                        <img
+                          src={exercise.image_url}
+                          alt={exercise.name}
+                          className="w-full h-full object-cover scale-[1.55] translate-y-[2%] group-hover:scale-[1.65] transition-transform duration-500"
+                        />
+                      </div>
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-muted-foreground">
+                        <span className="text-sm">No Image</span>
+                      </div>
                     )}
-                    {exercise.difficulty && (
-                      <span className="px-2 py-1 rounded-md bg-secondary text-muted-foreground text-xs">
-                        {exercise.difficulty}
-                      </span>
-                    )}
+                    <button
+                      onClick={() => addToProtocol(exercise)}
+                      disabled={!!builderExercises.find((e) => e.id === exercise.id)}
+                      className="absolute top-3 right-3 w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Plus className="w-5 h-5" />
+                    </button>
+                  </div>
+                  <div className="p-4">
+                    <h3 className="font-medium text-foreground mb-2">{exercise.name}</h3>
+                    <div className="flex flex-wrap gap-1">
+                      {exercise.joint && (
+                        <span className="px-2 py-1 rounded-md bg-secondary text-muted-foreground text-xs">
+                          {exercise.joint}
+                        </span>
+                      )}
+                      {exercise.difficulty && (
+                        <span className="px-2 py-1 rounded-md bg-secondary text-muted-foreground text-xs">
+                          {exercise.difficulty}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
 
-          {filteredExercises.length === 0 && (
+          {!exercisesLoading && filteredExercises.length === 0 && (
             <div className="text-center py-12 text-muted-foreground">
               <p>No exercises found matching &quot;{searchTerm}&quot;</p>
             </div>
@@ -285,18 +336,28 @@ const ProtocolBuilder = () => {
               {/* Patient Selection for Assignment */}
               <div className="mb-4">
                 <label className="text-xs text-muted-foreground block mb-1">Assign to Patient (optional)</label>
-                <select
-                  value={selectedPatientId}
-                  onChange={(e) => setSelectedPatientId(e.target.value)}
-                  className="w-full h-9 text-sm bg-card border border-border rounded px-3"
-                >
-                  <option value="">None (Save as Draft)</option>
-                  {DUMMY_PATIENTS.map((patient) => (
-                    <option key={patient.id} value={patient.id}>
-                      {patient.full_name}
-                    </option>
-                  ))}
-                </select>
+                {patientsLoading ? (
+                  <div className="flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Loading patients...
+                  </div>
+                ) : (
+                  <select
+                    value={selectedPatientId}
+                    onChange={(e) => setSelectedPatientId(e.target.value)}
+                    className="w-full h-9 text-sm bg-card border border-border rounded px-3"
+                  >
+                    <option value="">None (Save as Draft)</option>
+                    {patients.map((patient) => (
+                      <option key={patient.id} value={patient.id}>
+                        {patient.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {!patientsLoading && patients.length === 0 && (
+                  <p className="text-xs text-muted-foreground mt-1">No patients found. Add patients first.</p>
+                )}
               </div>
 
               <div className="flex gap-3">

@@ -11,6 +11,8 @@ import { useSession } from '@/context/SessionContext';
 import { useProtocol } from '@/context/ProtocolContext';
 import { useToast } from '@/hooks/use-toast';
 import type { Protocol, Session, Exercise } from '@/types/api';
+import { saveSessionToSupabase, SessionMetrics } from '@/lib/services/sessionService';
+import { protocolService } from '@/lib/services/protocolService';
 import { createPoseClient, PoseClient } from '@/lib/vision/poseClient';
 import type { PoseLandmark, ExerciseType, SessionRepPayload } from '@/lib/vision/types';
 import {
@@ -90,10 +92,55 @@ export default function PatientSessionActive() {
   const [exerciseRepsCompleted, setExerciseRepsCompleted] = useState<Record<string, number>>({});
 
   // Find protocol
-  const protocol = protocols.find(p => p.id === protocolIdParam) || null;
+  const [protocol, setProtocol] = useState<Protocol | null>(protocols.find(p => p.id === protocolIdParam) || null);
+  const [protocolLoading, setProtocolLoading] = useState(false);
 
-  // Use protocol steps
-  const steps = protocol?.steps || [];
+  // Fetch full protocol with steps if not found or steps missing
+  useEffect(() => {
+    const fetchProtocol = async () => {
+      if (!protocolIdParam) return;
+
+      // If we already have protocol from context but it has no steps, we might need to fetch
+      // But let's just always fetch to be safe and get fresh steps
+      setProtocolLoading(true);
+      const { data } = await protocolService.getById(protocolIdParam);
+      if (data) {
+        setProtocol(data);
+      }
+      setProtocolLoading(false);
+    };
+
+    fetchProtocol();
+  }, [protocolIdParam]);
+
+  // Use protocol steps - with fallback to generate from available exercises
+  const steps = useMemo(() => {
+    // If protocol has steps, use them
+    if (protocol?.steps && protocol.steps.length > 0) {
+      return protocol.steps;
+    }
+
+    // FALLBACK: For demo mode, create steps from available exercises
+    // This allows testing the pose detection without a full protocol setup
+    if (allExercises.length > 0) {
+      console.log('[PatientSessionActive] Using fallback exercises for demo mode');
+      return allExercises.slice(0, 3).map((ex, index) => ({
+        id: crypto.randomUUID(),
+        protocol_id: protocolIdParam || '',
+        exercise_id: ex.id,
+        sets: 2,
+        reps: 10,
+        duration_seconds: null,
+        side: 'both' as const,
+        notes: null,
+        order_index: index,
+        created_at: new Date().toISOString(),
+      }));
+    }
+
+    return [];
+  }, [protocol?.steps, allExercises, protocolIdParam]);
+
   const currentStep = steps[currentExerciseIndex];
   const totalExercises = steps.length;
   // Ref for access in animation loop
@@ -352,56 +399,106 @@ export default function PatientSessionActive() {
     setShowEndModal(true);
   };
 
-  const handleSaveAndFinish = () => {
-    if (!sessionId) {
-      toast({ title: 'Error', description: 'No active session', variant: 'destructive' });
-      return;
-    }
-
+  const handleSaveAndFinish = async () => {
     setIsSaving(true);
 
     try {
-      // 1. Build SessionResult for backend (simulated)
-      const exercisesExecuted: ExerciseResult[] = Object.keys(exerciseRepsCompleted).map(exId => {
-        // Filter reps for this exercise
-        const reps = liveReps.filter(r => r.exerciseId === exId);
-        const total = reps.length;
-        // Simple avgs
-        const avgScore = total > 0 ? reps.reduce((s, r) => s + (r.accuracyScore || 0), 0) / total : 0;
-        const avgMaxAngle = total > 0 ? reps.reduce((s, r) => s + (r.romMax || 0), 0) / total : 0;
+      // Build SessionMetrics for each exercise
+      const metricsMap = new Map<string, {
+        name: string;
+        slug: string;
+        reps: SessionRepPayload[]
+      }>();
+
+      // Group reps by exercise
+      for (const rep of liveReps) {
+        const exId = rep.exerciseId;
+        const exercise = exerciseMap.get(exId);
+        const exerciseName = exercise?.name || 'Unknown';
+
+        // Determine exercise slug based on name
+        let slug = 'unknown';
+        const nameLower = exerciseName.toLowerCase();
+        if (nameLower.includes('squat')) slug = 'squat';
+        else if (nameLower.includes('leg raise') || nameLower.includes('slr')) slug = 'slr';
+        else if (nameLower.includes('elbow') || nameLower.includes('curl')) slug = 'elbow_flexion';
+
+        if (!metricsMap.has(exId)) {
+          metricsMap.set(exId, { name: exerciseName, slug, reps: [] });
+        }
+        metricsMap.get(exId)!.reps.push(rep);
+      }
+
+      // Convert to SessionMetrics array
+      const metrics: SessionMetrics[] = Array.from(metricsMap.entries()).map(([exId, data]) => {
+        const reps = data.reps;
+        const totalReps = reps.length;
+        const avgAccuracy = totalReps > 0
+          ? reps.reduce((sum, r) => sum + (r.accuracyScore || 0), 0) / totalReps
+          : 0;
+        const avgRom = totalReps > 0
+          ? reps.reduce((sum, r) => sum + (r.romMax || 0), 0) / totalReps
+          : 0;
+        const avgTempo = totalReps > 0
+          ? reps.reduce((sum, r) => sum + (r.tempoScore || 0), 0) / totalReps
+          : 0;
 
         return {
-          exerciseKey: exId,
-          totalReps: total,
-          avgMaxAngle,
-          avgFormScore: avgScore
+          exercise_slug: data.slug,
+          exercise_name: data.name,
+          total_reps: totalReps,
+          avg_accuracy: Math.round(avgAccuracy),
+          avg_rom: Math.round(avgRom),
+          avg_tempo: Math.round(avgTempo),
+          reps_data: reps.map(r => ({
+            rep_index: r.repIndex,
+            rom_achieved: r.romMax || 0,
+            rom_target: r.romTarget || 90,
+            accuracy_score: r.accuracyScore || 0,
+            tempo_score: r.tempoScore,
+            form_quality: r.formQuality || 'unknown',
+            timestamp_ms: r.timestampMs || 0,
+          })),
         };
       });
 
-      const sessionResult: SessionResult = {
-        sessionId,
-        startedAt,
-        completedAt: new Date().toISOString(),
-        exercises: exercisesExecuted
-      };
-
-      console.log('SESSION_RESULT', sessionResult);
-
-      // 2. Call context update
-      updateSession(sessionId, {
-        status: 'completed',
+      // Save to Supabase
+      const savedSession = await saveSessionToSupabase({
+        protocol_id: protocolIdParam || undefined,
+        started_at: startedAt,
+        ended_at: new Date().toISOString(),
+        pain_score_pre: painLevelPre[0],
         pain_score_post: painLevelPost[0],
         notes: sessionNotes || undefined,
+        metrics,
       });
 
-      toast({
-        title: 'Session Completed',
-        description: 'Great work! Check the console for the JSON payload.',
-      });
+      if (savedSession) {
+        console.log('SESSION_SAVED_TO_SUPABASE', savedSession);
+        toast({
+          title: 'Session Completed! 🎉',
+          description: `Great work! ${metrics.reduce((sum, m) => sum + m.total_reps, 0)} reps saved.`,
+        });
+      } else {
+        // Fallback: still update local context
+        if (sessionId) {
+          updateSession(sessionId, {
+            status: 'completed',
+            pain_score_post: painLevelPost[0],
+            notes: sessionNotes || undefined,
+          });
+        }
+        toast({
+          title: 'Session Completed',
+          description: 'Saved locally (Supabase unavailable).',
+          variant: 'default',
+        });
+      }
+
       navigate('/patient/home');
     } catch (e) {
-      console.error(e);
-      toast({ title: 'Error', variant: 'destructive', description: 'Failed to save.' });
+      console.error('Session save error:', e);
+      toast({ title: 'Error', variant: 'destructive', description: 'Failed to save session.' });
     } finally {
       setIsSaving(false);
     }
@@ -416,13 +513,25 @@ export default function PatientSessionActive() {
 
   // Error state
   if (!protocolIdParam) return <div className="p-10 text-center">Missing Protocol ID</div>;
-  if (!protocol || steps.length === 0) return <div className="p-10 text-center">Loading Protocol...</div>;
+
+  // Show loading while exercises are being fetched
+  if (steps.length === 0) {
+    return (
+      <div className="p-10 text-center flex flex-col items-center gap-4">
+        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+        <p>Loading exercises...</p>
+        <p className="text-sm text-muted-foreground">
+          Make sure exercises are seeded in the database
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background text-foreground">
       {/* Top Bar */}
       <header className="h-14 border-b bg-background flex items-center justify-between px-6 sticky top-0 z-40">
-        <h1 className="font-semibold">{protocol.title}</h1>
+        <h1 className="font-semibold">{protocol?.title || 'Demo Session'}</h1>
         <Button variant="ghost" size="icon" onClick={handleEndSession}>
           <X className="w-5 h-5" />
         </Button>
