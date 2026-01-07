@@ -20,7 +20,12 @@ React + TypeScript + Vite frontend for the PhysioCheck Care Portal digital rehab
 
 2. **Configure environment variables:**
    
-   Create a `.env` file in the `frontend` directory:
+   Copy the example environment file and fill in your credentials from Supabase:
+   ```bash
+   cp .env.example .env
+   ```
+   
+   Your `.env` should look like this:
    ```env
    VITE_SUPABASE_URL=your_supabase_project_url
    VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
@@ -28,9 +33,9 @@ React + TypeScript + Vite frontend for the PhysioCheck Care Portal digital rehab
    ```
    
    **Where to get these:**
-   - **VITE_SUPABASE_URL**: From Supabase Dashboard → Settings → API → Project URL
-   - **VITE_SUPABASE_ANON_KEY**: From Supabase Dashboard → Settings → API → Project API keys → `anon` `public`
-   - **VITE_API_URL**: Your backend API base URL (default: `http://localhost:8000/api/v1`)
+   - **VITE_SUPABASE_URL**: Supabase Dashboard → Settings → API → Project URL
+   - **VITE_SUPABASE_ANON_KEY**: Supabase Dashboard → Settings → API → `anon` `public` key
+   - **VITE_API_URL**: Your backend API base URL (defaults to localhost)
 
 3. **Run the development server:**
    ```bash
@@ -112,7 +117,8 @@ frontend/
 ├── vite.config.ts              # Vite configuration
 ├── tsconfig.json               # TypeScript configuration
 ├── tailwind.config.ts          # Tailwind CSS configuration
-└── .env                         # Environment variables (create this)
+├── .env.example                 # Template for environment variables (copy this)
+├── .env                         # Your local environment variables (GIT IGNORED)
 ```
 
 ## Key Features
@@ -244,5 +250,11 @@ For backend integration, see:
 
 ---
 
-**Last Updated:** January 2025  
-**Frontend Version:** 1.0.0
+## Security
+
+This repository is configured with a two-layer `.gitignore` system (root and frontend) to ensure that sensitive files like `.env` are never committed to version control. Always use the `.env.example` file to communicate required variables to other developers or deployment platforms.
+
+---
+
+**Last Updated:** January 2026  
+**Frontend Version:** 1.0.1
