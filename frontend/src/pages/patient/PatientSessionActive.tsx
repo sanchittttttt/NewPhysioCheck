@@ -1,11 +1,12 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Play, Pause, SkipBack, SkipForward, X, CheckCircle, AlertCircle, Clock, Target, Loader2 } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, X, Loader2, Volume2, VolumeX, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Slider } from '@/components/ui/slider';
 import { Textarea } from '@/components/ui/textarea';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useAuth } from '@/context/AuthContext';
 import { useSession } from '@/context/SessionContext';
 import { useProtocol } from '@/context/ProtocolContext';
@@ -20,8 +21,12 @@ import {
   createSlrRepDetector,
   createSquatRepDetector,
   type RepDetector,
-  type RepOutput
+  type RepOutput,
+  type DifficultyLevel,
+  type ErrorSpotlight,
+  type PersonalizedROM,
 } from '@/lib/vision/repDetectors';
+import { createAudioFeedback, type AudioFeedbackController } from '@/lib/vision/audioFeedback';
 
 // --- DATA SHAPES FOR BACKEND INTEGRATION ---
 
@@ -33,11 +38,59 @@ interface SessionResult {
 }
 
 interface ExerciseResult {
-  exerciseKey: string; // 'squat', 'slr', etc.
+  exerciseKey: string;
   totalReps: number;
   avgMaxAngle: number;
   avgFormScore: number;
 }
+
+// MediaPipe connections for skeleton drawing
+const BODY_CONNECTIONS: Array<[number, number]> = [
+  // Torso
+  [11, 12], // shoulders
+  [11, 23], [12, 24], // shoulders to hips
+  [23, 24], // hips
+  // Arms
+  [11, 13], [13, 15], // left arm
+  [12, 14], [14, 16], // right arm
+  // Legs
+  [23, 25], [25, 27], // left leg
+  [24, 26], [26, 28], // right leg
+  // Hands (optional)
+  [15, 17], [15, 19], [15, 21], // left hand
+  [16, 18], [16, 20], [16, 22], // right hand
+  // Feet (optional)
+  [27, 29], [27, 31], // left foot
+  [28, 30], [28, 32], // right foot
+];
+
+// Face connections for drawing
+// MediaPipe Pose landmarks: 0=nose, 1=left_eye_inner, 2=left_eye, 3=left_eye_outer,
+// 4=right_eye_inner, 5=right_eye, 6=right_eye_outer, 7=left_ear, 8=right_ear,
+// 9=mouth_left, 10=mouth_right
+const FACE_CONNECTIONS: Array<[number, number]> = [
+  // Eyes - connect eye corners
+  [1, 2], [2, 3],  // Left eye inner -> center -> outer
+  [4, 5], [5, 6],  // Right eye inner -> center -> outer
+  // Nose to eyes
+  [0, 2], [0, 5],  // Nose to eye centers
+  // Ears to outer eyes
+  [3, 7],  // Left outer eye to left ear
+  [6, 8],  // Right outer eye to right ear
+  // Mouth
+  [9, 10], // Mouth corners
+];
+
+// Limb segment indices for error spotlight
+const LIMB_SEGMENTS: Record<string, number[]> = {
+  left_knee: [23, 25, 27],
+  right_knee: [24, 26, 28],
+  left_hip: [11, 23, 25],
+  right_hip: [12, 24, 26],
+  torso: [11, 12, 23, 24],
+  left_elbow: [11, 13, 15],
+  right_elbow: [12, 14, 16],
+};
 
 /**
  * PatientSessionActive Component
@@ -56,7 +109,6 @@ export default function PatientSessionActive() {
 
   // Initialize state
   const [sessionId, setSessionId] = useState<string | null>(sessionIdParam);
-  // Logically, we start session when we land here
   const [startedAt] = useState<string>(new Date().toISOString());
 
   const [currentExerciseIndex, setCurrentExerciseIndex] = useState(0);
@@ -71,6 +123,16 @@ export default function PatientSessionActive() {
   // Real-time Feedback State
   const [liveFeedback, setLiveFeedback] = useState('Get ready...');
   const [currentAngle, setCurrentAngle] = useState<number | null>(null);
+  const [errorSpotlight, setErrorSpotlight] = useState<ErrorSpotlight | undefined>();
+  const [personalizedROM, setPersonalizedROM] = useState<PersonalizedROM | undefined>();
+
+  // Tracking quality indicators
+  const [trackingQuality, setTrackingQuality] = useState(0);
+  const [fullBodyVisible, setFullBodyVisible] = useState(true);
+
+  // Difficulty and Audio
+  const [difficulty, setDifficulty] = useState<DifficultyLevel>('easy');
+  const [audioEnabled, setAudioEnabled] = useState(true);
 
   const [liveReps, setLiveReps] = useState<SessionRepPayload[]>([]);
   const [lastRep, setLastRep] = useState<SessionRepPayload | null>(null);
@@ -84,6 +146,7 @@ export default function PatientSessionActive() {
   const rafRef = useRef<number | null>(null);
   const repDetectorRef = useRef<RepDetector | null>(null);
   const isPausedRef = useRef<boolean>(false);
+  const audioFeedbackRef = useRef<AudioFeedbackController | null>(null);
 
   // To detect NEW reps in the loop
   const lastRepCountRef = useRef<number>(0);
@@ -95,13 +158,22 @@ export default function PatientSessionActive() {
   const [protocol, setProtocol] = useState<Protocol | null>(protocols.find(p => p.id === protocolIdParam) || null);
   const [protocolLoading, setProtocolLoading] = useState(false);
 
+  // Initialize audio feedback
+  useEffect(() => {
+    audioFeedbackRef.current = createAudioFeedback({ enabled: audioEnabled });
+  }, []);
+
+  // Update audio enabled state
+  useEffect(() => {
+    if (audioFeedbackRef.current) {
+      audioFeedbackRef.current.setEnabled(audioEnabled);
+    }
+  }, [audioEnabled]);
+
   // Fetch full protocol with steps if not found or steps missing
   useEffect(() => {
     const fetchProtocol = async () => {
       if (!protocolIdParam) return;
-
-      // If we already have protocol from context but it has no steps, we might need to fetch
-      // But let's just always fetch to be safe and get fresh steps
       setProtocolLoading(true);
       const { data } = await protocolService.getById(protocolIdParam);
       if (data) {
@@ -115,16 +187,24 @@ export default function PatientSessionActive() {
 
   // Use protocol steps - with fallback to generate from available exercises
   const steps = useMemo(() => {
-    // If protocol has steps, use them
     if (protocol?.steps && protocol.steps.length > 0) {
       return protocol.steps;
     }
 
-    // FALLBACK: For demo mode, create steps from available exercises
-    // This allows testing the pose detection without a full protocol setup
+    // FALLBACK: For demo mode, create steps from AI-enabled exercises
     if (allExercises.length > 0) {
       console.log('[PatientSessionActive] Using fallback exercises for demo mode');
-      return allExercises.slice(0, 3).map((ex, index) => ({
+      // Prefer AI-enabled exercises (squat, slr, bicep curl)
+      const aiExercises = allExercises.filter(ex =>
+        ex.name.toLowerCase().includes('squat') ||
+        ex.name.toLowerCase().includes('leg raise') ||
+        ex.name.toLowerCase().includes('slr') ||
+        ex.name.toLowerCase().includes('curl') ||
+        ex.name.toLowerCase().includes('bicep')
+      );
+      const exercisesToUse = aiExercises.length > 0 ? aiExercises : allExercises.slice(0, 3);
+
+      return exercisesToUse.map((ex, index) => ({
         id: crypto.randomUUID(),
         protocol_id: protocolIdParam || '',
         exercise_id: ex.id,
@@ -143,7 +223,6 @@ export default function PatientSessionActive() {
 
   const currentStep = steps[currentExerciseIndex];
   const totalExercises = steps.length;
-  // Ref for access in animation loop
   const currentStepRef = useRef<typeof currentStep>(currentStep);
 
   // Map exercises for easy lookup
@@ -177,54 +256,65 @@ export default function PatientSessionActive() {
     const name = (exerciseName || '').toLowerCase();
 
     if (name.includes('elbow') || name.includes('bicep') || name.includes('curl')) return 'elbow_flexion';
-    if (name.includes('slr') || name.includes('leg raise')) return 'slr';
+    if (name.includes('slr') || name.includes('leg raise') || name.includes('straight leg')) return 'slr';
     if (name.includes('squat')) return 'squat';
 
     const note = (step.notes || '').toLowerCase();
     if (note.includes('elbow')) return 'elbow_flexion';
+    if (note.includes('leg raise')) return 'slr';
 
     return 'squat';
   };
 
-  const createDetector = (type: ExerciseType, side: 'left' | 'right'): RepDetector => {
+  const createDetector = (type: ExerciseType, side: 'left' | 'right', difficulty: DifficultyLevel): RepDetector => {
     switch (type) {
       case 'elbow_flexion':
-        return createElbowFlexionRepDetector(side);
+        return createElbowFlexionRepDetector(side, difficulty);
       case 'slr':
-        return createSlrRepDetector(side);
+        return createSlrRepDetector(side, difficulty);
       case 'squat':
       default:
-        return createSquatRepDetector(side);
+        return createSquatRepDetector(side, difficulty);
     }
   };
 
-  // Recreate detector when exercise changes
+  // Recreate detector when exercise or difficulty changes
   useEffect(() => {
     if (!currentStep) return;
     const exerciseName = exerciseMap.get(currentStep.exercise_id)?.name;
     const type = resolveExerciseType(currentStep, exerciseName);
-
-    // Default to 'left' if not specified, or parse from notes if really needed. 
-    // Ideally ProtocolStep should have a side field.
     const side = (currentStep.side as 'left' | 'right') || 'left';
 
-    const detector = createDetector(type, side);
+    const detector = createDetector(type, side, difficulty);
     detector.reset();
     repDetectorRef.current = detector;
     lastRepCountRef.current = 0;
 
     setLastRep(null);
     setLiveFeedback('Get ready...');
+    setErrorSpotlight(undefined);
+    setPersonalizedROM(undefined);
+
+    // Reset audio state for new exercise
+    audioFeedbackRef.current?.reset();
+
     setExerciseRepsCompleted((prev) => ({
       ...prev,
       [currentStep.exercise_id]: prev[currentStep.exercise_id] || 0,
     }));
-  }, [currentStep, currentExerciseIndex, exerciseMap]);
+  }, [currentStep, currentExerciseIndex, exerciseMap, difficulty]);
+
+  // Update detector difficulty when changed
+  useEffect(() => {
+    if (repDetectorRef.current) {
+      repDetectorRef.current.setDifficulty(difficulty);
+    }
+  }, [difficulty]);
 
   /**
-   * Draw a simple skeleton on the canvas using normalized landmarks.
+   * Draw skeleton with face, body, and error spotlight overlay
    */
-  const drawSkeleton = (landmarks: PoseLandmark[]) => {
+  const drawSkeleton = useCallback((landmarks: PoseLandmark[], spotlight?: ErrorSpotlight) => {
     const videoEl = videoRef.current;
     const canvas = canvasRef.current;
     if (!videoEl || !canvas) return;
@@ -240,45 +330,108 @@ export default function PatientSessionActive() {
     if (!ctx) return;
 
     ctx.clearRect(0, 0, width, height);
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = '#10b981';
-    ctx.fillStyle = '#22d3ee';
-
-    const connections: Array<[number, number]> = [
-      [11, 12],
-      [11, 13], [13, 15],
-      [12, 14], [14, 16],
-      [11, 23], [12, 24],
-      [23, 24],
-      [23, 25], [25, 27],
-      [24, 26], [26, 28],
-    ];
 
     const toPx = (lm: PoseLandmark) => ({ x: lm.x * width, y: lm.y * height });
+    // Body landmarks need higher visibility, face landmarks can have lower
+    const isBodyVisible = (lm: PoseLandmark) => (lm.visibility ?? 1) > 0.5;
+    const isFaceVisible = (lm: PoseLandmark) => (lm.visibility ?? 1) > 0.2; // Lower threshold for face
 
-    connections.forEach(([aIdx, bIdx]) => {
+    // Get highlighted limb indices for error spotlight
+    const highlightedIndices = new Set<number>();
+    if (spotlight?.limbSegment && spotlight.errorMagnitude > 0.3) { // Increased from 0.2
+      const indices = LIMB_SEGMENTS[spotlight.limbSegment] || [];
+      indices.forEach(i => highlightedIndices.add(i));
+    }
+
+    // Draw body connections
+    ctx.lineWidth = 3;
+    BODY_CONNECTIONS.forEach(([aIdx, bIdx]) => {
       const a = landmarks[aIdx];
       const b = landmarks[bIdx];
-      if (!a || !b) return;
+      if (!a || !b || !isBodyVisible(a) || !isBodyVisible(b)) return;
+
       const pa = toPx(a);
       const pb = toPx(b);
-      // Only draw visible points
-      if ((a.visibility ?? 1) > 0.5 && (b.visibility ?? 1) > 0.5) {
-        ctx.beginPath();
-        ctx.moveTo(pa.x, pa.y);
-        ctx.lineTo(pb.x, pb.y);
-        ctx.stroke();
+
+      // Color based on error spotlight
+      const isHighlighted = highlightedIndices.has(aIdx) || highlightedIndices.has(bIdx);
+      if (isHighlighted && spotlight) {
+        const intensity = Math.min(spotlight.errorMagnitude * 1.5, 1);
+        ctx.strokeStyle = `rgba(239, 68, 68, ${0.5 + intensity * 0.5})`; // Red with varying intensity
+        ctx.lineWidth = 5;
+      } else {
+        ctx.strokeStyle = '#10b981'; // Green
+        ctx.lineWidth = 3;
       }
+
+      ctx.beginPath();
+      ctx.moveTo(pa.x, pa.y);
+      ctx.lineTo(pb.x, pb.y);
+      ctx.stroke();
     });
 
-    landmarks.forEach((lm) => {
-      if (!lm || (lm.visibility ?? 1) < 0.5) return;
-      const p = toPx(lm);
+    // Draw face connections (thinner, different color) - use lower visibility threshold
+    ctx.strokeStyle = '#60a5fa'; // Blue for face
+    ctx.lineWidth = 2;
+    FACE_CONNECTIONS.forEach(([aIdx, bIdx]) => {
+      const a = landmarks[aIdx];
+      const b = landmarks[bIdx];
+      if (!a || !b || !isFaceVisible(a) || !isFaceVisible(b)) return;
+
+      const pa = toPx(a);
+      const pb = toPx(b);
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 4, 0, 2 * Math.PI);
-      ctx.fill();
+      ctx.moveTo(pa.x, pa.y);
+      ctx.lineTo(pb.x, pb.y);
+      ctx.stroke();
     });
-  };
+
+    // Draw landmarks
+    landmarks.forEach((lm, idx) => {
+      const isFace = idx <= 10;
+      // Use different visibility thresholds for face vs body
+      const visible = isFace ? isFaceVisible(lm) : isBodyVisible(lm);
+      if (!lm || !visible) return;
+      const p = toPx(lm);
+
+      // Size and color based on type and highlight
+      const isHighlighted = highlightedIndices.has(idx);
+
+      if (isHighlighted && spotlight) {
+        ctx.fillStyle = '#ef4444'; // Red for error
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 8, 0, 2 * Math.PI);
+        ctx.fill();
+
+        // Draw correction arrow
+        if (spotlight.correctionDirection && idx === Math.min(...Array.from(highlightedIndices))) {
+          ctx.strokeStyle = '#fbbf24'; // Yellow arrow
+          ctx.lineWidth = 3;
+          const arrowLen = 40;
+          const dx = spotlight.correctionDirection.x * arrowLen;
+          const dy = spotlight.correctionDirection.y * arrowLen;
+          ctx.beginPath();
+          ctx.moveTo(p.x, p.y);
+          ctx.lineTo(p.x + dx, p.y + dy);
+          ctx.stroke();
+
+          // Arrow head
+          ctx.beginPath();
+          ctx.moveTo(p.x + dx, p.y + dy);
+          ctx.lineTo(p.x + dx - 8, p.y + dy - 8 * Math.sign(dy || 1));
+          ctx.lineTo(p.x + dx + 8, p.y + dy - 8 * Math.sign(dy || 1));
+          ctx.closePath();
+          ctx.fillStyle = '#fbbf24';
+          ctx.fill();
+        }
+      } else {
+        ctx.fillStyle = isFace ? '#60a5fa' : '#22d3ee';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, isFace ? 3 : 5, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    });
+  }, []);
 
   /**
    * Start camera + pose client loop.
@@ -288,8 +441,15 @@ export default function PatientSessionActive() {
 
     const startVision = async () => {
       try {
+        // Request HD resolution for better pose tracking
+        // Higher resolution = better landmark accuracy, especially for extremities
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user' },
+          video: {
+            facingMode: 'user',
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30, max: 60 }
+          },
           audio: false,
         });
         if (!isMounted) return;
@@ -315,10 +475,15 @@ export default function PatientSessionActive() {
           if (!poseClientRef.current || !videoRef.current) return;
           const result = await poseClientRef.current.process(videoRef.current);
 
+          // Update tracking quality indicators
+          setTrackingQuality(poseClientRef.current.getTrackingQuality());
+          setFullBodyVisible(poseClientRef.current.isFullBodyVisible());
+
           if (result?.landmarks) {
-            // Rep detection logic
             const detector = repDetectorRef.current;
             const step = currentStepRef.current;
+
+            let currentSpotlight: ErrorSpotlight | undefined;
 
             if (detector && step && !isPausedRef.current) {
               const output: RepOutput = detector.update({
@@ -331,10 +496,22 @@ export default function PatientSessionActive() {
               if (output.currentAngle !== undefined) {
                 setCurrentAngle(output.currentAngle);
               }
+              if (output.errorSpotlight) {
+                setErrorSpotlight(output.errorSpotlight);
+                currentSpotlight = output.errorSpotlight;
+              }
+              if (output.personalizedROM) {
+                setPersonalizedROM(output.personalizedROM);
+              }
 
               // Check for NEW rep
               if (output.repCount > lastRepCountRef.current) {
                 lastRepCountRef.current = output.repCount;
+
+                // Audio feedback
+                if (output.lastRep) {
+                  audioFeedbackRef.current?.announceRep(output.repCount, output.lastRep.formScore);
+                }
 
                 // Rep completed!
                 if (output.lastRep) {
@@ -342,10 +519,11 @@ export default function PatientSessionActive() {
                   const payload: SessionRepPayload = {
                     exerciseId,
                     repIndex: output.repCount,
-                    romMax: output.lastRep.maxAngle - output.lastRep.minAngle, // Approximation
-                    romTarget: 90, // Demo hardcoded or pull from protocol?
-                    accuracyScore: Math.round((output.lastRep.formScore / 100) * 100), // Map to 0-100 if needed
-                    formQuality: output.lastRep.formScore > 80 ? 'good' : 'improve',
+                    romMax: output.lastRep.maxAngle - output.lastRep.minAngle,
+                    romTarget: output.personalizedROM?.targetROM || 90,
+                    accuracyScore: Math.round((output.lastRep.formScore / 100) * 100),
+                    tempoScore: output.lastRep.tempoScore,
+                    formQuality: output.lastRep.formScore > 80 ? 'good' : output.lastRep.formScore > 60 ? 'fair' : 'improve',
                     timestampMs: Date.now()
                   };
 
@@ -359,7 +537,7 @@ export default function PatientSessionActive() {
               }
             }
 
-            drawSkeleton(result.landmarks);
+            drawSkeleton(result.landmarks, currentSpotlight);
           }
           rafRef.current = requestAnimationFrame(loop);
         };
@@ -381,7 +559,7 @@ export default function PatientSessionActive() {
       streamRef.current?.getTracks().forEach((track) => track.stop());
       poseClientRef.current?.destroy();
     };
-  }, []);
+  }, [drawSkeleton]);
 
   const handleNextExercise = () => {
     if (currentExerciseIndex < totalExercises - 1) {
@@ -403,20 +581,17 @@ export default function PatientSessionActive() {
     setIsSaving(true);
 
     try {
-      // Build SessionMetrics for each exercise
       const metricsMap = new Map<string, {
         name: string;
         slug: string;
         reps: SessionRepPayload[]
       }>();
 
-      // Group reps by exercise
       for (const rep of liveReps) {
         const exId = rep.exerciseId;
         const exercise = exerciseMap.get(exId);
         const exerciseName = exercise?.name || 'Unknown';
 
-        // Determine exercise slug based on name
         let slug = 'unknown';
         const nameLower = exerciseName.toLowerCase();
         if (nameLower.includes('squat')) slug = 'squat';
@@ -429,7 +604,6 @@ export default function PatientSessionActive() {
         metricsMap.get(exId)!.reps.push(rep);
       }
 
-      // Convert to SessionMetrics array
       const metrics: SessionMetrics[] = Array.from(metricsMap.entries()).map(([exId, data]) => {
         const reps = data.reps;
         const totalReps = reps.length;
@@ -462,7 +636,6 @@ export default function PatientSessionActive() {
         };
       });
 
-      // Save to Supabase
       const savedSession = await saveSessionToSupabase({
         protocol_id: protocolIdParam || undefined,
         started_at: startedAt,
@@ -480,7 +653,6 @@ export default function PatientSessionActive() {
           description: `Great work! ${metrics.reduce((sum, m) => sum + m.total_reps, 0)} reps saved.`,
         });
       } else {
-        // Fallback: still update local context
         if (sessionId) {
           updateSession(sessionId, {
             status: 'completed',
@@ -532,9 +704,34 @@ export default function PatientSessionActive() {
       {/* Top Bar */}
       <header className="h-14 border-b bg-background flex items-center justify-between px-6 sticky top-0 z-40">
         <h1 className="font-semibold">{protocol?.title || 'Demo Session'}</h1>
-        <Button variant="ghost" size="icon" onClick={handleEndSession}>
-          <X className="w-5 h-5" />
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* Difficulty Selector */}
+          <Select value={difficulty} onValueChange={(v) => setDifficulty(v as DifficultyLevel)}>
+            <SelectTrigger className="w-24 h-8">
+              <Zap className="w-3 h-3 mr-1" />
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="easy">Easy</SelectItem>
+              <SelectItem value="normal">Normal</SelectItem>
+              <SelectItem value="hard">Hard</SelectItem>
+            </SelectContent>
+          </Select>
+
+          {/* Audio Toggle */}
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setAudioEnabled(!audioEnabled)}
+            title={audioEnabled ? 'Mute audio' : 'Enable audio'}
+          >
+            {audioEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+          </Button>
+
+          <Button variant="ghost" size="icon" onClick={handleEndSession}>
+            <X className="w-5 h-5" />
+          </Button>
+        </div>
       </header>
 
       <div className="flex flex-col lg:flex-row h-[calc(100vh-56px)]">
@@ -553,6 +750,12 @@ export default function PatientSessionActive() {
                 {currentAngle}°
               </div>
             )}
+            {/* Error Spotlight Message */}
+            {errorSpotlight?.message && errorSpotlight.errorMagnitude > 0.3 && (
+              <div className="text-lg text-red-400 font-medium drop-shadow-md animate-pulse">
+                ⚠️ {errorSpotlight.message}
+              </div>
+            )}
           </div>
 
           {/* Exercise Info Overlay */}
@@ -560,7 +763,49 @@ export default function PatientSessionActive() {
             <div className="text-sm opacity-80">Exercise {currentExerciseIndex + 1}/{totalExercises}</div>
             <div className="font-bold text-lg">{getCurrentExerciseName()}</div>
             {currentStep.side && <div className="text-sm text-emerald-400 uppercase tracking-wider">{currentStep.side} Side</div>}
+            <div className="text-xs text-amber-400 mt-1 capitalize">
+              {difficulty} Mode
+            </div>
           </div>
+
+          {/* Personalized ROM Display */}
+          {personalizedROM && personalizedROM.repCount > 0 && (
+            <div className="absolute top-4 right-4 bg-black/60 text-white p-3 rounded-lg backdrop-blur-sm z-20">
+              <div className="text-xs opacity-80 uppercase tracking-wider">Your Progress</div>
+              <div className="text-lg font-bold text-emerald-400">{Math.round(personalizedROM.bestAchieved)}° best</div>
+              <div className="text-sm text-blue-400">Target: {Math.round(personalizedROM.targetROM)}°</div>
+            </div>
+          )}
+
+          {/* Tracking Quality Indicator */}
+          <div className="absolute bottom-4 left-4 bg-black/60 text-white px-3 py-2 rounded-lg backdrop-blur-sm z-20">
+            <div className="text-xs opacity-80 uppercase tracking-wider mb-1">Tracking</div>
+            <div className="flex items-center gap-2">
+              <div className="w-16 h-2 bg-gray-700 rounded-full overflow-hidden">
+                <div
+                  className={`h-full transition-all ${trackingQuality > 70 ? 'bg-emerald-500' :
+                    trackingQuality > 40 ? 'bg-amber-500' : 'bg-red-500'
+                    }`}
+                  style={{ width: `${trackingQuality}%` }}
+                />
+              </div>
+              <span className={`text-sm font-mono ${trackingQuality > 70 ? 'text-emerald-400' :
+                trackingQuality > 40 ? 'text-amber-400' : 'text-red-400'
+                }`}>
+                {trackingQuality}%
+              </span>
+            </div>
+          </div>
+
+          {/* Full Body Visibility Warning */}
+          {!fullBodyVisible && poseReady && (
+            <div className="absolute bottom-20 left-1/2 -translate-x-1/2 bg-amber-500/90 text-black px-4 py-2 rounded-lg backdrop-blur-sm z-30 animate-bounce">
+              <div className="flex items-center gap-2 font-medium">
+                <span>📐</span>
+                <span>Step back - show full body (head to feet)</span>
+              </div>
+            </div>
+          )}
 
           {cameraError && (
             <div className="absolute inset-0 flex items-center justify-center bg-background text-destructive z-30">
@@ -568,8 +813,9 @@ export default function PatientSessionActive() {
             </div>
           )}
           {!poseReady && !cameraError && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black text-white z-30">
+            <div className="absolute inset-0 flex items-center justify-center bg-black text-white z-30 flex-col gap-2">
               <Loader2 className="w-10 h-10 animate-spin" />
+              <div className="text-sm text-muted-foreground">Loading AI model (Heavy)...</div>
             </div>
           )}
         </div>
@@ -591,14 +837,18 @@ export default function PatientSessionActive() {
             {lastRep && (
               <div className="bg-secondary/20 p-4 rounded-xl border border-border">
                 <div className="text-xs text-muted-foreground mb-2 font-medium uppercase">Last Rep Analysis</div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="text-center">
                     <div className="text-2xl font-bold">{lastRep.accuracyScore}%</div>
-                    <div className="text-xs text-muted-foreground">Form Score</div>
+                    <div className="text-xs text-muted-foreground">Form</div>
                   </div>
-                  <div>
+                  <div className="text-center">
                     <div className="text-2xl font-bold">{Math.round(lastRep.romMax || 0)}°</div>
                     <div className="text-xs text-muted-foreground">ROM</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-2xl font-bold">{lastRep.tempoScore || 0}</div>
+                    <div className="text-xs text-muted-foreground">Tempo</div>
                   </div>
                 </div>
               </div>
@@ -642,10 +892,11 @@ export default function PatientSessionActive() {
               </Button>
             </div>
 
-            {/* Debug/Notes */}
-            <div className="text-xs text-muted-foreground text-center pt-10">
-              <p>Camera-based detection active.</p>
-              <p>Ensure your full body is visible.</p>
+            {/* Tips */}
+            <div className="text-xs text-muted-foreground text-center pt-6 space-y-1">
+              <p>🎯 AI-powered tracking active</p>
+              <p>Ensure your full body is visible</p>
+              {audioEnabled && <p>🔊 Audio feedback enabled</p>}
             </div>
           </div>
         </div>

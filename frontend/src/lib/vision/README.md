@@ -12,87 +12,117 @@ It uses a "geometric" approach: measuring joint angles from 3D landmarks to trac
 
 2.  **`angles.ts`**: Pure math layer.
     *   `computeAngle(a, b, c)`: Calculates the angle at 'b'.
-    *   Helpers like `kneeFlexionAngle`, `hipFlexionAngle`.
+    *   Helpers like `kneeFlexionAngle`, `hipFlexionAngle`, `torsoLeanAngle`.
     *   **Smoothing**: Uses Exponential Moving Average (EMA) to reduce jitter.
-    *   **Note**: All joint angles are in degrees within the range [0, 180], computed using the vector dot product with safety checks for zero‑length vectors. This avoids NaNs and keeps the math numerically stable.
 
 3.  **`repDetectors.ts`**: Exercise logic ("The Brain").
     *   Each exercise has a **State Machine** (Ready -> Down -> Bottom -> Up).
+    *   Supports **Easy/Normal/Hard** difficulty levels.
     *   Tracks reps, range of motion (ROM), and form faults.
+    *   **Personalized ROM**: Learns user's natural range and adapts targets.
+    *   **Error Spotlight**: Identifies worst-performing limb segment with correction arrows.
+    *   **Tempo Scoring**: Rewards controlled, steady movements.
     *   Returns a standardized `RepOutput` object.
-    *   **Debugging**: A `DEBUG_REPS` flag can be toggled to log state transitions (READY → DOWN → BOTTOM → UP), current angles (throttled), and `lastRep` metrics during testing. Turn this on when tuning thresholds or diagnosing missed reps, and keep it off in normal use.
+
+4.  **`audioFeedback.ts`**: Web Speech API integration.
+    *   Voice rep count announcements (1, 2, 3...).
+    *   Form praise ("Great!", "Perfect!").
+    *   Correction cues.
 
 ## Supported Exercises
 
 ### 1. Squat
 *   **Metric**: Knee Flexion Angle (180° = Standing, <90° = Deep Squat).
-*   **Phases**:
-    *   `DOWN`: Angle < 110°.
-    *   `BOTTOM`: Angle < 95° (Target).
-    *   `UP`: Return to > 160°.
-*   The phase thresholds (e.g., 110° for DOWN, 95° for BOTTOM, 160°+ for UP) are defined as tweakable constants at the top of `repDetectors.ts`. You can lower the BOTTOM angle for deeper squats (harder) or raise it for shallower squats (easier).
+*   **Thresholds by Difficulty**:
+    | Difficulty | Down | Bottom | Up |
+    |------------|------|--------|-----|
+    | Easy       | 130° | 115°   | 150° |
+    | Normal     | 110° | 95°    | 160° |
+    | Hard       | 100° | 85°    | 165° |
 
 ### 2. Straight Leg Raise (SLR)
 *   **Metric**: Hip Flexion Angle (180° = Flat, <90° = Vertical Leg).
-*   **Phases**:
-    *   `DOWN` (Leg going up): Angle < 165°.
-    *   `BOTTOM` (Peak height): Angle < 110°.
-    *   `UP` (Leg lowering): Return to > 165°.
-*   The phase thresholds (e.g., 165° for DOWN, 110° for BOTTOM) are defined as tweakable constants at the top of `repDetectors.ts`. You can lower the BOTTOM angle for a higher leg lift (harder) or raise it for a lower lift (easier).
+*   **Thresholds by Difficulty**:
+    | Difficulty | Up   | Top  | Down |
+    |------------|------|------|------|
+    | Easy       | 170° | 135° | 170° |
+    | Normal     | 165° | 110° | 165° |
+    | Hard       | 160° | 95°  | 160° |
 
 ### 3. Elbow Flexion (Bicep Curl)
 *   **Metric**: Elbow Angle (180° = Straight, <45° = Curled).
-*   **Phases**:
-    *   `DOWN` (Curling up): Angle < 150°.
-    *   `BOTTOM` (Squeeze): Angle < 60°.
-    *   `UP` (Lowering): Return to > 160°.
-*   The phase thresholds (e.g., 150° for DOWN, 60° for BOTTOM) are defined as tweakable constants at the top of `repDetectors.ts`. You can lower the BOTTOM angle for a tighter squeeze (harder) or raise it for a looser curl (easier).
+*   **Thresholds by Difficulty**:
+    | Difficulty | Flex | Top  | Ext  |
+    |------------|------|------|------|
+    | Easy       | 160° | 80°  | 155° |
+    | Normal     | 150° | 60°  | 160° |
+    | Hard       | 140° | 45°  | 165° |
 
-## Configuration & Tuning
+## Key Features
 
-All key thresholds are defined as constants at the top of `src/lib/vision/repDetectors.ts`.
-
+### Difficulty Levels
 ```typescript
-export const SQUAT_DOWN_ANGLE = 110;
-export const SQUAT_BOTTOM_ANGLE = 95;
+type DifficultyLevel = 'easy' | 'normal' | 'hard';
+detector.setDifficulty('easy'); // Change dynamically
 ```
 
-**To adjust difficulty**:
-*   **Decrease** `BOTTOM` angles to require deeper movements (harder).
-*   **Increase** `BOTTOM` angles to allow shallower reps (easier).
+### Personalized ROM Learning
+The system tracks each user's:
+- **Best Achieved**: Peak ROM in session
+- **Average Achieved**: Running average
+- **Adaptive Target**: Set to 80% of best achieved
 
-## Side Handling
-
-Detectors accept an optional `side` argument:
+### Error Spotlight
+Returns detailed error information for visual feedback:
 ```typescript
-createSquatRepDetector('left'); // Tracks left hip/knee/ankle
-createSquatRepDetector('right'); // Tracks right
+interface ErrorSpotlight {
+  limbSegment: 'left_knee' | 'torso' | ...;
+  errorMagnitude: number; // 0-1
+  correctionDirection: { x: number; y: number }; // Arrow vector
+  message: string;
+}
 ```
-Default is `'left'`.
+
+### Tempo Scoring (0-100)
+- <500ms: 20 (way too fast)
+- 1-1.5s: 60-85 (acceptable)
+- 2-3s: 100 (excellent - controlled)
+- >4s: 60 (too slow)
+
+### Visibility Checks
+Landmarks must have visibility > 0.5 before angle calculation:
+```typescript
+const MIN_VISIBILITY = 0.5;
+if ((landmark.visibility ?? 1) < MIN_VISIBILITY) {
+  return { feedback: 'Move closer to camera' };
+}
+```
 
 ## Form Scoring
 
 A `formScore` (0-100) is calculated for every rep based on:
 1.  **ROM** (70%): Did you hit the target angle?
-2.  **Tempo** (30%): Was the rep too fast (<1s) or controlled?
+2.  **Tempo** (30%): Was the rep controlled?
+
+## Audio Feedback
+
+```typescript
+import { createAudioFeedback } from './audioFeedback';
+
+const audio = createAudioFeedback({ enabled: true });
+audio.announceRep(count, formScore);
+audio.announceCorrection('Go deeper');
+audio.reset(); // On exercise change
+```
 
 ## Integration
 
-The UI (`PatientSessionActive.tsx`) consumes the `RepOutput` from the active detector.
-On session finish, it logs a `SessionResult` object:
+The UI (`PatientSessionActive.tsx`) renders:
+- Face + body skeleton overlay
+- Error spotlight with red highlights and correction arrows
+- Real-time angle display
+- Personalized ROM progress
+- Difficulty selector
+- Audio toggle
 
-```typescript
-interface SessionResult {
-  sessionId: string;
-  startedAt: string;
-  completedAt: string;
-  exercises: {
-    exerciseKey: string;
-    totalReps: number;
-    avgMaxAngle: number;
-    avgFormScore: number;
-  }[];
-}
-```
-
-`startedAt` and `completedAt` are ISO timestamps that allow the backend to compute session duration, adherence, and scheduling analytics later. The frontend constructs this object when the user finishes a session; the backend can persist it as‑is.
+On session finish, metrics are saved to Supabase including per-rep tempo scores.

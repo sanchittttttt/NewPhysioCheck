@@ -17,6 +17,47 @@ export interface MockExercise {
 }
 
 export const MOCK_EXERCISES: MockExercise[] = [
+    // Exercises with AI-powered pose detection (matches repDetectors.ts)
+    {
+        id: 'ex-squat',
+        name: 'Bodyweight Squat',
+        description: 'Stand with feet shoulder-width apart, bend knees and lower hips as if sitting back. AI tracks your knee angle for proper depth.',
+        image_url: null,
+        joint: 'knee',
+        position: 'standing',
+        equipment: 'none',
+        difficulty: 'beginner',
+        normal_range_min: 90,
+        normal_range_max: 180,
+        created_at: '2025-01-01T00:00:00Z',
+    },
+    {
+        id: 'ex-slr',
+        name: 'Straight Leg Raise',
+        description: 'Lie on your back with legs straight. Lift one leg toward ceiling keeping knee locked. AI tracks your hip flexion angle.',
+        image_url: null,
+        joint: 'hip',
+        position: 'supine',
+        equipment: 'none',
+        difficulty: 'beginner',
+        normal_range_min: 60,
+        normal_range_max: 180,
+        created_at: '2025-01-01T00:00:00Z',
+    },
+    {
+        id: 'ex-bicep-curl',
+        name: 'Bicep Curl',
+        description: 'Stand with arm at side, curl forearm up toward shoulder. AI tracks your elbow flexion for complete range of motion.',
+        image_url: null,
+        joint: 'elbow',
+        position: 'standing',
+        equipment: 'dumbbell',
+        difficulty: 'beginner',
+        normal_range_min: 30,
+        normal_range_max: 180,
+        created_at: '2025-01-01T00:00:00Z',
+    },
+    // Standard exercises
     {
         id: 'ex-1',
         name: 'Quad Sets',
