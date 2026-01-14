@@ -1,4 +1,4 @@
-# PhysioCheck Care Portal - Frontend
+# PhysioCheck Care Portal
 
 React + TypeScript + Vite frontend for the PhysioCheck Care Portal digital rehabilitation platform.
 
