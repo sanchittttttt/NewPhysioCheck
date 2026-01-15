@@ -7,7 +7,10 @@
 
 // Google Gemini Configuration
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
-const GEMINI_API_URL = import.meta.env.VITE_GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent';
+// Default to gemini-1.5-flash which is widely available
+const DEFAULT_GEMINI_MODEL = 'gemini-1.5-flash';
+const GEMINI_MODEL = import.meta.env.VITE_GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+const GEMINI_API_BASE = import.meta.env.VITE_GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1';
 const USE_AI_SERVICE = import.meta.env.VITE_USE_AI_SERVICE === 'true' && !!GEMINI_API_KEY;
 
 export interface PatientSessionData {
@@ -113,7 +116,16 @@ ${s.exercises.map(e => `    • ${e.name}: ${e.reps} reps, ${e.avg_rom !== null 
 Generate 3-7 insights. Prioritize critical safety issues first (especially pain increases). Return ONLY valid JSON, no markdown formatting.`;
 
   try {
-    const url = `${GEMINI_API_URL}?key=${GEMINI_API_KEY}`;
+    // Construct URL: if VITE_GEMINI_API_URL is a full URL, use it; otherwise build from base + model
+    let url: string;
+    if (import.meta.env.VITE_GEMINI_API_URL && import.meta.env.VITE_GEMINI_API_URL.includes(':generateContent')) {
+      // Full URL provided (legacy format)
+      url = `${import.meta.env.VITE_GEMINI_API_URL}?key=${GEMINI_API_KEY}`;
+    } else {
+      // Build URL from base + model
+      url = `${GEMINI_API_BASE}/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    }
+    
     const response = await fetch(url, {
       method: 'POST',
       headers: {
