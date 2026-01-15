@@ -1,12 +1,15 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { TrendingUp, TrendingDown, Flame, CheckCircle, Loader2 } from 'lucide-react';
+import { TrendingUp, TrendingDown, Flame, CheckCircle, Loader2, Brain, AlertTriangle, Info, X } from 'lucide-react';
 import { PatientLayout } from '@/components/layout/PatientLayout';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Button } from '@/components/ui/button';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { sessionService } from '@/lib/services/sessionService';
-import { protocolService } from '@/lib/services/protocolService';
-import type { Session, Protocol } from '@/types/api';
+import { protocolService, type Protocol as ProtocolServiceProtocol } from '@/lib/services/protocolService';
+import { aiInsightsService, type AIInsight } from '@/lib/services/aiInsightsService';
+import { useAuth } from '@/context/AuthContext';
+import type { Session } from '@/types/api';
 
 function CircularProgress({ value, size = 80 }: { value: number; size?: number }) {
   const strokeWidth = 6;
@@ -110,6 +113,75 @@ function MiniCalendar({ sessions }: { sessions: Session[] }) {
 export default function PatientProgress() {
   const [dateRange, setDateRange] = useState('30');
   const [protocolFilter, setProtocolFilter] = useState('all');
+  const { user } = useAuth();
+  
+  // Fetch AI insights for this patient
+  const [aiInsights, setAiInsights] = useState<AIInsight[]>([]);
+  const [insightsLoading, setInsightsLoading] = useState(true);
+  
+  useEffect(() => {
+    const fetchInsights = async () => {
+      if (!user?.id) {
+        setInsightsLoading(false);
+        return;
+      }
+
+      setInsightsLoading(true);
+      const { data, error } = await aiInsightsService.getAll({
+        patient_id: user.id,
+        limit: 5,
+        include_read: true,
+      });
+
+      if (!error && data) {
+        setAiInsights(data);
+      }
+      setInsightsLoading(false);
+    };
+    fetchInsights();
+  }, [user?.id]);
+
+  const handleMarkAsRead = async (insightId: string) => {
+    await aiInsightsService.markAsRead(insightId);
+    setAiInsights(prev => prev.map(i => i.id === insightId ? { ...i, is_read: true } : i));
+  };
+
+  const getSeverityIcon = (severity: AIInsight['severity']) => {
+    switch (severity) {
+      case 'success':
+        return <CheckCircle className="w-5 h-5 text-success" />;
+      case 'warning':
+        return <AlertTriangle className="w-5 h-5 text-warning" />;
+      case 'critical':
+        return <AlertTriangle className="w-5 h-5 text-destructive" />;
+      default:
+        return <Info className="w-5 h-5 text-primary" />;
+    }
+  };
+
+  const getSeverityColor = (severity: AIInsight['severity']) => {
+    switch (severity) {
+      case 'success':
+        return 'border-success/50 bg-success/10';
+      case 'warning':
+        return 'border-warning/50 bg-warning/10';
+      case 'critical':
+        return 'border-destructive/50 bg-destructive/10';
+      default:
+        return 'border-primary/50 bg-primary/10';
+    }
+  };
+
+  const formatDate = (dateString: string) => {
+    try {
+      return new Date(dateString).toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+      });
+    } catch {
+      return dateString;
+    }
+  };
 
   const { data: sessionsData, isLoading } = useQuery({
     queryKey: ['sessions', 'patient-progress'],
@@ -122,7 +194,7 @@ export default function PatientProgress() {
   });
 
   const sessions: Session[] = sessionsData?.data || [];
-  const protocols: Protocol[] = protocolsData?.data || [];
+  const protocols: ProtocolServiceProtocol[] = protocolsData?.data || [];
 
   // Filter sessions by date range and protocol
   const filteredSessions = useMemo(() => {
@@ -410,6 +482,83 @@ export default function PatientProgress() {
             <p className="text-sm text-muted-foreground">Keep working on your sessions to see highlights!</p>
           )}
         </div>
+      </div>
+
+      {/* AI Insights Section */}
+      <div className="stat-card">
+        <div className="flex items-center gap-2 mb-3 md:mb-4">
+          <Brain className="w-4 h-4 md:w-5 md:h-5 text-primary" />
+          <h3 className="text-base md:text-lg font-semibold text-foreground">AI Insights</h3>
+        </div>
+
+        {insightsLoading && aiInsights.length === 0 ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="w-6 h-6 animate-spin text-primary" />
+          </div>
+        ) : aiInsights.length === 0 ? (
+          <div className="text-center py-8">
+            <Brain className="w-10 h-10 mx-auto mb-2 text-muted-foreground opacity-50" />
+            <p className="text-sm text-muted-foreground">No insights available yet.</p>
+            <p className="text-xs text-muted-foreground mt-1">Your doctor will see insights based on your progress.</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {aiInsights.map((insight) => (
+              <div
+                key={insight.id}
+                className={`rounded-lg p-3 md:p-4 border-2 ${getSeverityColor(insight.severity)} ${
+                  insight.is_read ? 'opacity-70' : ''
+                }`}
+              >
+                <div className="flex items-start gap-3">
+                  <div className="flex-shrink-0 mt-0.5">
+                    {getSeverityIcon(insight.severity)}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-start justify-between gap-2 mb-1">
+                      <div>
+                        <h4 className="font-semibold text-foreground text-sm">{insight.title}</h4>
+                        <div className="flex items-center gap-2 mt-1 flex-wrap">
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-secondary/50 text-muted-foreground capitalize">
+                            {insight.insight_type}
+                          </span>
+                          <span className="text-xs text-muted-foreground">
+                            {formatDate(insight.generated_at)}
+                          </span>
+                        </div>
+                      </div>
+                      {!insight.is_read && (
+                        <Button
+                          onClick={() => handleMarkAsRead(insight.id)}
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 w-6 p-0 flex-shrink-0"
+                        >
+                          <CheckCircle className="w-4 h-4" />
+                        </Button>
+                      )}
+                    </div>
+                    <p className="text-sm text-foreground/90 leading-relaxed mt-2">
+                      {insight.description}
+                    </p>
+                    {insight.metadata && Object.keys(insight.metadata).length > 0 && (
+                      <div className="mt-2 pt-2 border-t border-border/50">
+                        <div className="flex flex-wrap gap-2">
+                          {Object.entries(insight.metadata).map(([key, value]) => (
+                            <span key={key} className="text-xs text-muted-foreground">
+                              <span className="font-medium">{key.replace(/_/g, ' ')}:</span>{' '}
+                              {typeof value === 'number' ? value.toFixed(1) : String(value)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </PatientLayout>
   );

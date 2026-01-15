@@ -275,6 +275,18 @@ export default function PatientHome() {
       .slice(0, 4);
   }, [sessions]);
 
+  // Get all completed sessions (for history) - sorted by date, newest first
+  const completedSessions = useMemo(() => {
+    return sessions
+      .filter((s) => s.status === 'completed')
+      .sort((a, b) => {
+        const aDate = a.started_at || a.created_at || '';
+        const bDate = b.started_at || b.created_at || '';
+        return new Date(bDate).getTime() - new Date(aDate).getTime();
+      })
+      .slice(0, 10); // Show last 10 completed sessions
+  }, [sessions]);
+
   // Choose a session to start: today's session if present, otherwise the next upcoming
   const sessionToStart = useMemo(() => {
     if (todaysSession) return todaysSession;
@@ -547,6 +559,66 @@ export default function PatientHome() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Session History - All Completed Sessions */}
+      <div className="stat-card mb-4 md:mb-6">
+        <div className="flex items-center justify-between mb-3 md:mb-4">
+          <h3 className="text-base md:text-lg font-semibold text-foreground">Session History</h3>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-primary text-xs md:text-sm"
+            onClick={() => navigate('/patient/sessions')}
+          >
+            <span className="hidden sm:inline">View all sessions</span>
+            <span className="sm:hidden">View all</span>
+            <ChevronRight className="w-4 h-4 ml-1" />
+          </Button>
+        </div>
+
+        {completedSessions.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No completed sessions yet. Complete your first session to see it here!</p>
+        ) : (
+          <div className="space-y-2 md:space-y-3">
+            {completedSessions.map((session) => {
+              const protocol = protocolMap.get(session.protocol_id);
+              const sessionDate = session.started_at ? session.started_at.split('T')[0] : session.created_at?.split('T')[0] || '';
+              return (
+                <div key={session.id} className="flex items-center justify-between py-2 md:py-3 border-b border-border last:border-0">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      <span className="text-xs md:text-sm font-medium text-foreground">
+                        {formatDate(sessionDate)}
+                      </span>
+                      {session.started_at && (
+                        <span className="text-xs md:text-sm text-muted-foreground">
+                          {formatTime(session.started_at)}
+                        </span>
+                      )}
+                      {session.pain_score_post !== null && (
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-secondary/50 text-muted-foreground">
+                          Pain: {session.pain_score_post}/10
+                        </span>
+                      )}
+                      {session.rom_delta !== null && (
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-success/20 text-success">
+                          ROM: +{session.rom_delta}°
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs md:text-sm text-muted-foreground truncate">
+                      {protocol?.title || 'Unknown Protocol'}
+                    </p>
+                  </div>
+                  <span className="pill pill-success text-[10px] md:text-xs ml-2">
+                    Completed
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Bottom row - Recent Feedback */}

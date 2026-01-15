@@ -5,6 +5,7 @@ import { AuthProvider } from "./context/AuthContext";
 import { ProtocolProvider } from "./context/ProtocolContext";
 import { SessionProvider } from "./context/SessionContext";
 import { MessageProvider } from "./context/MessageContext";
+import { NotificationProvider } from "./context/NotificationContext";
 import "./index.css";
 
 // Note: We keep auth data in localStorage so users stay logged in
@@ -15,14 +16,16 @@ createRoot(document.getElementById("root")!).render(
     <ProtocolProvider>
       <SessionProvider>
         <MessageProvider>
-          <BrowserRouter
-            future={{
-              v7_startTransition: true,
-              v7_relativeSplatPath: true,
-            }}
-          >
-            <App />
-          </BrowserRouter>
+          <NotificationProvider>
+            <BrowserRouter
+              future={{
+                v7_startTransition: true,
+                v7_relativeSplatPath: true,
+              }}
+            >
+              <App />
+            </BrowserRouter>
+          </NotificationProvider>
         </MessageProvider>
       </SessionProvider>
     </ProtocolProvider>

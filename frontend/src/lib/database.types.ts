@@ -299,6 +299,51 @@ export interface Database {
           created_at?: string
         }
       }
+      // AI Insights
+      ai_insights: {
+        Row: {
+          id: string
+          patient_id: string
+          insight_type: 'progress' | 'adherence' | 'pain' | 'form' | 'recommendation' | 'risk' | 'milestone'
+          title: string
+          description: string
+          severity: 'info' | 'warning' | 'critical' | 'success' | null
+          category: string | null
+          metadata: Json | null
+          is_read: boolean
+          generated_at: string
+          expires_at: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          patient_id: string
+          insight_type: 'progress' | 'adherence' | 'pain' | 'form' | 'recommendation' | 'risk' | 'milestone'
+          title: string
+          description: string
+          severity?: 'info' | 'warning' | 'critical' | 'success' | null
+          category?: string | null
+          metadata?: Json | null
+          is_read?: boolean
+          generated_at?: string
+          expires_at?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          patient_id?: string
+          insight_type?: 'progress' | 'adherence' | 'pain' | 'form' | 'recommendation' | 'risk' | 'milestone'
+          title?: string
+          description?: string
+          severity?: 'info' | 'warning' | 'critical' | 'success' | null
+          category?: string | null
+          metadata?: Json | null
+          is_read?: boolean
+          generated_at?: string
+          expires_at?: string | null
+          created_at?: string
+        }
+      }
     }
     Views: {
       [_ in never]: never

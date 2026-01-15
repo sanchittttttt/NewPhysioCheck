@@ -1,6 +1,6 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { MainLayout } from '@/components/layout/MainLayout';
-import { ArrowLeft, User, Calendar, FileText, MessageCircle, Loader2, Plus } from 'lucide-react';
+import { ArrowLeft, User, Calendar, FileText, MessageCircle, Loader2, Plus, Brain, CheckCircle, AlertTriangle, Info, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import { ScheduleSessionDialog } from '@/components/doctor/ScheduleSessionDialog';
@@ -10,6 +10,7 @@ import { useProtocol } from '@/context/ProtocolContext';
 import { supabase } from '@/lib/supabaseClient';
 import { DemoUser } from '@/lib/demoAuth';
 import type { Protocol } from '@/types/api';
+import { aiInsightsService, type AIInsight } from '@/lib/services/aiInsightsService';
 
 const PatientDetail = () => {
   const { id } = useParams<{ id: string }>();
@@ -77,6 +78,97 @@ const PatientDetail = () => {
     };
     fetchAssignments();
   }, [id]);
+
+  // Get AI insights for this patient
+  const [aiInsights, setAiInsights] = useState<AIInsight[]>([]);
+  const [insightsLoading, setInsightsLoading] = useState(true);
+  useEffect(() => {
+    const fetchInsights = async () => {
+      if (!id) {
+        setInsightsLoading(false);
+        return;
+      }
+
+      setInsightsLoading(true);
+      const { data, error } = await aiInsightsService.getAll({
+        patient_id: id,
+        limit: 10,
+      });
+
+      if (!error && data) {
+        setAiInsights(data);
+      }
+      setInsightsLoading(false);
+    };
+    fetchInsights();
+  }, [id]);
+
+  const handleGenerateInsights = async () => {
+    if (!id) return;
+    setInsightsLoading(true);
+    const { data, error } = await aiInsightsService.generate(id);
+    if (!error && data) {
+      toast({
+        title: 'Insights Generated',
+        description: `Generated ${data.length} new insights for this patient.`,
+      });
+      // Refresh insights
+      const { data: refreshed } = await aiInsightsService.getAll({
+        patient_id: id,
+        limit: 10,
+      });
+      if (refreshed) setAiInsights(refreshed);
+    } else {
+      toast({
+        title: 'Error',
+        description: 'Failed to generate insights. Please try again.',
+        variant: 'destructive',
+      });
+    }
+    setInsightsLoading(false);
+  };
+
+  const handleMarkAsRead = async (insightId: string) => {
+    await aiInsightsService.markAsRead(insightId);
+    setAiInsights(prev => prev.map(i => i.id === insightId ? { ...i, is_read: true } : i));
+  };
+
+  const handleDeleteInsight = async (insightId: string) => {
+    const { error } = await aiInsightsService.delete(insightId);
+    if (!error) {
+      setAiInsights(prev => prev.filter(i => i.id !== insightId));
+      toast({
+        title: 'Insight Deleted',
+        description: 'The insight has been removed.',
+      });
+    }
+  };
+
+  const getSeverityIcon = (severity: AIInsight['severity']) => {
+    switch (severity) {
+      case 'success':
+        return <CheckCircle className="w-5 h-5 text-success" />;
+      case 'warning':
+        return <AlertTriangle className="w-5 h-5 text-warning" />;
+      case 'critical':
+        return <AlertTriangle className="w-5 h-5 text-destructive" />;
+      default:
+        return <Info className="w-5 h-5 text-primary" />;
+    }
+  };
+
+  const getSeverityColor = (severity: AIInsight['severity']) => {
+    switch (severity) {
+      case 'success':
+        return 'border-success/50 bg-success/10';
+      case 'warning':
+        return 'border-warning/50 bg-warning/10';
+      case 'critical':
+        return 'border-destructive/50 bg-destructive/10';
+      default:
+        return 'border-primary/50 bg-primary/10';
+    }
+  };
 
   const protocolMap = useMemo(() => {
     const map = new Map<string, Protocol>();
@@ -205,6 +297,118 @@ const PatientDetail = () => {
               </div>
             </div>
           </div>
+        </div>
+
+        {/* AI Insights Section */}
+        <div className="stat-card">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-foreground flex items-center gap-2">
+              <Brain className="w-5 h-5 text-primary" />
+              AI Insights
+            </h3>
+            <Button
+              onClick={handleGenerateInsights}
+              variant="outline"
+              size="sm"
+              disabled={insightsLoading}
+            >
+              {insightsLoading ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Generating...
+                </>
+              ) : (
+                <>
+                  <Brain className="w-4 h-4 mr-2" />
+                  Generate Insights
+                </>
+              )}
+            </Button>
+          </div>
+
+          {insightsLoading && aiInsights.length === 0 ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="w-6 h-6 animate-spin text-primary" />
+            </div>
+          ) : aiInsights.length === 0 ? (
+            <div className="text-center py-8">
+              <Brain className="w-12 h-12 mx-auto mb-3 text-muted-foreground opacity-50" />
+              <p className="text-sm text-muted-foreground mb-2">No AI insights available yet.</p>
+              <p className="text-xs text-muted-foreground">Click "Generate Insights" to analyze patient data and get recommendations.</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {aiInsights.map((insight) => (
+                <div
+                  key={insight.id}
+                  className={`rounded-lg p-4 border-2 ${getSeverityColor(insight.severity)} ${
+                    insight.is_read ? 'opacity-70' : ''
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="flex-shrink-0 mt-0.5">
+                      {getSeverityIcon(insight.severity)}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-start justify-between gap-2 mb-1">
+                        <div>
+                          <h4 className="font-semibold text-foreground text-sm">{insight.title}</h4>
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-secondary/50 text-muted-foreground capitalize">
+                              {insight.insight_type}
+                            </span>
+                            {insight.category && (
+                              <span className="text-xs text-muted-foreground">
+                                {insight.category}
+                              </span>
+                            )}
+                            <span className="text-xs text-muted-foreground">
+                              {formatDate(insight.generated_at)}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          {!insight.is_read && (
+                            <Button
+                              onClick={() => handleMarkAsRead(insight.id)}
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 w-6 p-0"
+                            >
+                              <CheckCircle className="w-4 h-4" />
+                            </Button>
+                          )}
+                          <Button
+                            onClick={() => handleDeleteInsight(insight.id)}
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive"
+                          >
+                            <X className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      </div>
+                      <p className="text-sm text-foreground/90 leading-relaxed">
+                        {insight.description}
+                      </p>
+                      {insight.metadata && Object.keys(insight.metadata).length > 0 && (
+                        <div className="mt-2 pt-2 border-t border-border/50">
+                          <div className="flex flex-wrap gap-2">
+                            {Object.entries(insight.metadata).map(([key, value]) => (
+                              <span key={key} className="text-xs text-muted-foreground">
+                                <span className="font-medium">{key.replace(/_/g, ' ')}:</span>{' '}
+                                {typeof value === 'number' ? value.toFixed(1) : String(value)}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Assigned Protocols */}

@@ -113,6 +113,22 @@ CREATE TABLE IF NOT EXISTS public.messages (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- AI Insights (Patient Analysis and Recommendations)
+CREATE TABLE IF NOT EXISTS public.ai_insights (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  patient_id TEXT NOT NULL REFERENCES public.demo_users(id) ON DELETE CASCADE,
+  insight_type TEXT NOT NULL CHECK (insight_type IN ('progress', 'adherence', 'pain', 'form', 'recommendation', 'risk', 'milestone')),
+  title TEXT NOT NULL,
+  description TEXT NOT NULL,
+  severity TEXT CHECK (severity IN ('info', 'warning', 'critical', 'success')),
+  category TEXT, -- e.g., 'performance', 'safety', 'engagement'
+  metadata JSONB, -- Additional data like trends, percentages, etc.
+  is_read BOOLEAN DEFAULT FALSE,
+  generated_at TIMESTAMPTZ DEFAULT NOW(),
+  expires_at TIMESTAMPTZ, -- Optional expiry date for temporary insights
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_sessions_patient ON public.sessions(patient_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_doctor ON public.sessions(doctor_id);
@@ -122,6 +138,9 @@ CREATE INDEX IF NOT EXISTS idx_doctor_patients_patient ON public.doctor_patients
 CREATE INDEX IF NOT EXISTS idx_messages_from ON public.messages(from_user);
 CREATE INDEX IF NOT EXISTS idx_messages_to ON public.messages(to_user);
 CREATE INDEX IF NOT EXISTS idx_protocol_steps_protocol ON public.protocol_steps(protocol_id);
+CREATE INDEX IF NOT EXISTS idx_ai_insights_patient ON public.ai_insights(patient_id);
+CREATE INDEX IF NOT EXISTS idx_ai_insights_type ON public.ai_insights(insight_type);
+CREATE INDEX IF NOT EXISTS idx_ai_insights_created ON public.ai_insights(created_at DESC);
 
 -- ==============================================
 -- DISABLE RLS FOR DEMO MODE (No auth)
@@ -138,6 +157,7 @@ ALTER TABLE public.session_metrics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.assignments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.protocol_steps ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ai_insights ENABLE ROW LEVEL SECURITY;
 
 -- Open policies for demo mode (allow all operations)
 CREATE POLICY "Allow all for demo_users" ON public.demo_users FOR ALL USING (true) WITH CHECK (true);
@@ -149,6 +169,7 @@ CREATE POLICY "Allow all for session_metrics" ON public.session_metrics FOR ALL 
 CREATE POLICY "Allow all for assignments" ON public.assignments FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all for messages" ON public.messages FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all for protocol_steps" ON public.protocol_steps FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all for ai_insights" ON public.ai_insights FOR ALL USING (true) WITH CHECK (true);
 
 -- ==============================================
 -- SEED DATA (Optional - can also be done from UI)

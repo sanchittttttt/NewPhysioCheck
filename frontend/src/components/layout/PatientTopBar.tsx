@@ -10,6 +10,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { NotificationBell } from '@/components/notifications/NotificationBell';
 
 interface PatientTopBarProps {
   title: string;
@@ -51,6 +52,10 @@ export function PatientTopBar({ title, subtitle }: PatientTopBarProps) {
       </div>
 
       <div className="flex items-center gap-2 flex-shrink-0">
+        {/* AI Insights Notifications */}
+        <NotificationBell />
+
+        {/* Messages */}
         <button
           onClick={handleNotifications}
           className="w-9 h-9 md:w-10 md:h-10 rounded-full bg-secondary hover:bg-secondary/80 flex items-center justify-center transition-colors relative"

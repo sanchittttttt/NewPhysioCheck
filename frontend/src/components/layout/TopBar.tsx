@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { useQuery } from '@tanstack/react-query';
 import { messageService } from '@/lib/services/messageService';
+import { NotificationBell } from '@/components/notifications/NotificationBell';
 
 interface TopBarProps {
   title: string;
@@ -65,6 +66,10 @@ export function TopBar({ title, subtitle }: TopBarProps) {
           Hello, {user?.email?.split('@')[0] || 'Doctor'}
         </span>
 
+        {/* AI Insights Notifications */}
+        <NotificationBell />
+
+        {/* Messages */}
         <button
           onClick={handleNotifications}
           className="w-9 h-9 md:w-10 md:h-10 rounded-full bg-secondary hover:bg-secondary/80 flex items-center justify-center transition-colors relative"

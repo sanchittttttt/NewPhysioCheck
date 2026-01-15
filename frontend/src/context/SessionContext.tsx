@@ -2,6 +2,9 @@ import { createContext, useContext, useState, useEffect, ReactNode } from 'react
 import type { Session, SessionStatus } from '@/types/api';
 import { supabase } from '@/lib/supabaseClient';
 import { getDemoUser } from '@/lib/demoAuth';
+import { useAuth } from '@/context/AuthContext';
+import { MOCK_SESSIONS } from '@/lib/mockData/sessions';
+import { toDemoId, toMockId } from '@/lib/mockData/demoIdMap';
 
 interface SessionContextType {
     sessions: Session[];
@@ -19,13 +22,38 @@ interface SessionContextType {
 const SessionContext = createContext<SessionContextType | undefined>(undefined);
 
 export function SessionProvider({ children }: { children: ReactNode }) {
+    const { user } = useAuth();
     const [sessions, setSessions] = useState<Session[]>([]);
     const [loading, setLoading] = useState(true);
 
+    const getFallbackSessions = (demoUserId: string, role: 'patient' | 'doctor'): Session[] => {
+        const mockId = toMockId(demoUserId);
+        const relevant = MOCK_SESSIONS.filter((s) => (role === 'patient' ? s.patientId === mockId : s.doctorId === mockId));
+
+        return relevant.map((s) => ({
+            id: `mock-${s.id}`,
+            protocol_id: s.protocolId,
+            patient_id: toDemoId(s.patientId) || s.patientId,
+            assignment_id: null,
+            scheduled_date: s.startDate ? s.startDate.split('T')[0] : null,
+            status: (s.status === 'cancelled' ? 'missed' : s.status) as SessionStatus,
+            notes: s.notes || null,
+            created_at: s.startDate,
+            started_at: s.startDate,
+            ended_at: s.endDate || null,
+            pain_score_pre: s.painLevel ?? null,
+            pain_score_post: s.painLevel ?? null,
+            accuracy_avg: null,
+            rom_delta: null,
+            adherence_score: null,
+            reps: [],
+        }));
+    };
+
     // Fetch sessions from Supabase
     const fetchSessions = async () => {
-        const user = getDemoUser();
-        if (!user) {
+        const demoUser = user || getDemoUser();
+        if (!demoUser) {
             setSessions([]);
             setLoading(false);
             return;
@@ -38,17 +66,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 .order('created_at', { ascending: false });
 
             // Filter by role
-            if (user.role === 'patient') {
-                query = query.eq('patient_id', user.id);
-            } else if (user.role === 'doctor') {
-                query = query.eq('doctor_id', user.id);
+            if (demoUser.role === 'patient') {
+                query = query.eq('patient_id', demoUser.id);
+            } else if (demoUser.role === 'doctor') {
+                query = query.eq('doctor_id', demoUser.id);
             }
 
             const { data, error } = await query;
 
             if (error) {
                 console.error('[SessionContext] fetchSessions error:', error);
-                setSessions([]);
+                setSessions(getFallbackSessions(demoUser.id, demoUser.role));
                 return;
             }
 
@@ -72,10 +100,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 reps: [],
             }));
 
-            setSessions(mapped);
+            // If DB has no sessions yet, show demo/mock sessions so UI isn't blank.
+            setSessions(mapped.length > 0 ? mapped : getFallbackSessions(demoUser.id, demoUser.role));
         } catch (e) {
             console.error('[SessionContext] fetchSessions exception:', e);
-            setSessions([]);
+            const demoUser = user || getDemoUser();
+            setSessions(demoUser ? getFallbackSessions(demoUser.id, demoUser.role) : []);
         } finally {
             setLoading(false);
         }
@@ -85,6 +115,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     useEffect(() => {
         fetchSessions();
     }, []);
+
+    // Refresh sessions when auth user changes (login/logout)
+    useEffect(() => {
+        setLoading(true);
+        fetchSessions();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [user?.id]);
 
     // Create session in Supabase
     const createSession = async (input: {

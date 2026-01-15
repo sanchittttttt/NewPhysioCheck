@@ -3,6 +3,8 @@ import { useAuth } from './AuthContext';
 import type { Protocol, ProtocolStep, Exercise } from '@/types/api';
 import { supabase } from '@/lib/supabaseClient';
 import { getDemoUser } from '@/lib/demoAuth';
+import { getMockProtocols } from '@/lib/mockData/mockProtocols';
+import { toDemoId, toMockId } from '@/lib/mockData/demoIdMap';
 
 import StraightLegRaiseImg from '@/assets/images/StraightLegRaise.png';
 import SquatImg from '@/assets/images/Squat.png';
@@ -92,6 +94,17 @@ export function ProtocolProvider({ children }: { children: ReactNode }) {
 
             if (error) {
                 console.error('[ProtocolContext] fetchProtocols error:', error);
+                // Fallback to mock protocols for demo/dev
+                const mockDoctorId = toMockId(demoUser.id);
+                const fallback = getMockProtocols(mockDoctorId || undefined).map((p) => ({
+                    id: p.id,
+                    title: p.title,
+                    doctor_id: toDemoId(p.doctor_id) || p.doctor_id,
+                    notes: p.notes,
+                    created_at: p.created_at,
+                    steps: [],
+                })) as Protocol[];
+                setProtocols(fallback);
                 return;
             }
 
@@ -105,7 +118,21 @@ export function ProtocolProvider({ children }: { children: ReactNode }) {
                 steps: [], // Steps would be fetched separately if needed
             }));
 
-            setProtocols(mapped);
+            if (mapped.length > 0) {
+                setProtocols(mapped);
+            } else {
+                // If DB has no protocols yet, show mock protocols so UI isn't blank.
+                const mockDoctorId = toMockId(demoUser.id);
+                const fallback = getMockProtocols(mockDoctorId || undefined).map((p) => ({
+                    id: p.id,
+                    title: p.title,
+                    doctor_id: toDemoId(p.doctor_id) || p.doctor_id,
+                    notes: p.notes,
+                    created_at: p.created_at,
+                    steps: [],
+                })) as Protocol[];
+                setProtocols(fallback);
+            }
         } catch (e) {
             console.error('[ProtocolContext] fetchProtocols exception:', e);
         }

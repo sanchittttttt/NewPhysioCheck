@@ -100,7 +100,7 @@ export default function PatientSessionActive() {
   const [searchParams] = useSearchParams();
   const { user } = useAuth();
   const { toast } = useToast();
-  const { updateSession } = useSession();
+  const { updateSession, refreshSessions } = useSession();
   const { protocols, exercises: allExercises } = useProtocol();
 
   // Get session_id and protocol_id from URL params
@@ -648,6 +648,10 @@ export default function PatientSessionActive() {
 
       if (savedSession) {
         console.log('SESSION_SAVED_TO_SUPABASE', savedSession);
+        
+        // Refresh sessions in context to show the new session immediately
+        refreshSessions();
+        
         toast({
           title: 'Session Completed! 🎉',
           description: `Great work! ${metrics.reduce((sum, m) => sum + m.total_reps, 0)} reps saved.`,

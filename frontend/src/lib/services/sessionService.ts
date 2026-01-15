@@ -9,6 +9,7 @@
  */
 import { supabase } from '@/lib/supabaseClient';
 import { getDemoUser, getPatientDoctor } from '@/lib/demoAuth';
+import { generateInsightsFromSessions } from './aiInsightsService';
 
 // ============================================
 // TYPES
@@ -94,7 +95,7 @@ export async function createSession(input: CreateSessionInput): Promise<SessionR
         notes: input.notes || null,
       } as any)
       .select()
-      .single();
+      .single() as { data: any; error: any };
 
     if (error || !data) {
       console.error('[SessionService] createSession error:', error);
@@ -161,18 +162,20 @@ export async function completeSession(
   input: CompleteSessionInput
 ): Promise<SessionRecord | null> {
   try {
-    const { data, error } = await supabase
-      .from('sessions')
+    const query = supabase.from('sessions') as any;
+    const result = await query
       .update({
         status: 'completed',
         ended_at: new Date().toISOString(),
         pain_score_post: input.pain_score_post,
         notes: input.notes || null,
         summary: input.summary as any,
-      } as any)
+      })
       .eq('id', sessionId)
       .select()
       .single();
+    
+    const { data, error } = result;
 
     if (error || !data) {
       console.error('[SessionService] completeSession error:', error);
@@ -254,7 +257,7 @@ export async function saveSessionToSupabase(
         summary: summary as any,
       } as any)
       .select()
-      .single();
+      .single() as { data: any; error: any };
 
     if (sessionError || !session) {
       console.error('[SessionService] saveSession error:', sessionError);
@@ -263,10 +266,17 @@ export async function saveSessionToSupabase(
 
     // Add metrics for each exercise
     for (const metric of input.metrics) {
-      await addSessionMetrics(session.id, metric.exercise_slug, metric);
+      await addSessionMetrics((session as any).id, metric.exercise_slug, metric);
     }
 
-    console.log('[SessionService] Full session saved:', session.id);
+    console.log('[SessionService] Full session saved:', (session as any).id);
+
+    // Generate AI insights asynchronously after session completion
+    // Don't await - let it run in background to avoid blocking
+    generateInsightsAfterSession(user.id).catch((error) => {
+      console.error('[SessionService] Failed to generate insights after session:', error);
+    });
+
     return session as SessionRecord;
   } catch (e) {
     console.error('[SessionService] saveSessionToSupabase exception:', e);
@@ -413,6 +423,37 @@ export async function getPatientStats(patientId?: string): Promise<PatientStats>
 // ============================================
 // For components that import { sessionService } and expect object-based API
 
+/**
+ * Generate insights after a session is completed
+ * Called automatically after session save - runs asynchronously
+ */
+async function generateInsightsAfterSession(patientId: string): Promise<void> {
+  try {
+    console.log('[SessionService] Generating insights for patient:', patientId);
+    const { data, error } = await generateInsightsFromSessions(patientId);
+    
+    if (error) {
+      console.error('[SessionService] Insight generation error:', error);
+      return;
+    }
+
+    if (data && data.length > 0) {
+      console.log(`[SessionService] Generated ${data.length} insights for patient ${patientId}`);
+      
+      // Check for critical insights and trigger notifications
+      const criticalInsights = data.filter(i => i.severity === 'critical');
+      if (criticalInsights.length > 0) {
+        // Dispatch custom event for notifications
+        window.dispatchEvent(new CustomEvent('critical-insight-generated', {
+          detail: { patientId, insights: criticalInsights }
+        }));
+      }
+    }
+  } catch (error) {
+    console.error('[SessionService] Exception generating insights:', error);
+  }
+}
+
 export const sessionService = {
   // Create
   create: createSession,
@@ -424,10 +465,48 @@ export const sessionService = {
 
     if (user.role === 'doctor') {
       const sessions = await getDoctorSessions();
-      return { data: sessions, error: null };
+      // Map SessionRecord[] to Session[] format
+      const mappedSessions = sessions.map((s: any) => ({
+        id: s.id,
+        protocol_id: s.protocol_id,
+        patient_id: s.patient_id,
+        assignment_id: s.assignment_id,
+        scheduled_date: s.started_at ? s.started_at.split('T')[0] : null,
+        status: s.status,
+        notes: s.notes,
+        created_at: s.created_at,
+        started_at: s.started_at,
+        ended_at: s.ended_at,
+        pain_score_pre: s.pain_score_pre,
+        pain_score_post: s.pain_score_post,
+        accuracy_avg: s.summary?.accuracy_avg || null,
+        rom_delta: s.summary?.rom_delta || null,
+        adherence_score: null,
+        reps: [],
+      }));
+      return { data: mappedSessions, error: null };
     } else {
       const sessions = await getPatientSessions();
-      return { data: sessions, error: null };
+      // Map SessionRecord[] to Session[] format
+      const mappedSessions = sessions.map((s: any) => ({
+        id: s.id,
+        protocol_id: s.protocol_id,
+        patient_id: s.patient_id,
+        assignment_id: s.assignment_id,
+        scheduled_date: s.started_at ? s.started_at.split('T')[0] : null,
+        status: s.status,
+        notes: s.notes,
+        created_at: s.created_at,
+        started_at: s.started_at,
+        ended_at: s.ended_at,
+        pain_score_pre: s.pain_score_pre,
+        pain_score_post: s.pain_score_post,
+        accuracy_avg: s.summary?.accuracy_avg || null,
+        rom_delta: s.summary?.rom_delta || null,
+        adherence_score: null,
+        reps: [],
+      }));
+      return { data: mappedSessions, error: null };
     }
   },
 
@@ -451,12 +530,13 @@ export const sessionService = {
   // Start session
   start: async (id: string) => {
     try {
-      const { data, error } = await supabase
-        .from('sessions')
-        .update({ status: 'in_progress', started_at: new Date().toISOString() } as any)
+      const query = supabase.from('sessions') as any;
+      const result = await query
+        .update({ status: 'in_progress', started_at: new Date().toISOString() })
         .eq('id', id)
         .select()
         .single();
+      const { data, error } = result;
       return { data, error };
     } catch (e) {
       return { data: null, error: e };
