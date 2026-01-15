@@ -140,7 +140,6 @@ Generate 3-7 insights. Prioritize critical safety issues first (especially pain 
         generationConfig: {
           temperature: 0.7,
           maxOutputTokens: 2000,
-          responseMimeType: 'application/json',
         },
       }),
     });
