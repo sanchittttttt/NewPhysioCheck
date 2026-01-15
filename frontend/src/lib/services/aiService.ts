@@ -1,17 +1,10 @@
 /**
- * External AI Service Wrapper
- * 
- * Connects to Google Gemini API to generate sophisticated insights.
- * Falls back to rule-based generation if Gemini API is not configured.
+ * AI Insights Service - Pure Rule-based Implementation
+ *
+ * NOTE: There are **no external AI calls** here. All insights are generated
+ * locally from pain, ROM, adherence and recent-session metrics so it works
+ * 100% offline and never depends on Gemini/OpenAI.
  */
-
-// Google Gemini Configuration
-const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
-// Default to gemini-1.5-flash which is widely available
-const DEFAULT_GEMINI_MODEL = 'gemini-1.5-flash';
-const GEMINI_MODEL = import.meta.env.VITE_GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
-const GEMINI_API_BASE = import.meta.env.VITE_GEMINI_API_URL || 'https://generativelanguage.googleapis.com/v1';
-const USE_AI_SERVICE = import.meta.env.VITE_USE_AI_SERVICE === 'true' && !!GEMINI_API_KEY;
 
 export interface PatientSessionData {
   patient_id: string;
@@ -46,177 +39,14 @@ export interface AIInsightSuggestion {
 }
 
 /**
- * Generate AI insights using Google Gemini
- */
-async function generateInsightsWithGemini(
-  sessionData: PatientSessionData
-): Promise<AIInsightSuggestion[]> {
-  if (!GEMINI_API_KEY) {
-    throw new Error('Gemini API key not configured');
-  }
-
-  const prompt = `You are an AI assistant specialized in physiotherapy and rehabilitation. 
-Analyze patient session data and generate actionable insights for healthcare providers.
-
-Generate insights that are:
-- Clinically relevant and evidence-based
-- Actionable for doctors
-- Patient-friendly when appropriate
-- Prioritized by severity (critical > warning > info > success)
-
-Return insights in JSON format as a JSON object with an "insights" array. Each insight should have:
-- insight_type: one of 'progress', 'adherence', 'pain', 'form', 'recommendation', 'risk', 'milestone'
-- title: concise title (max 60 chars)
-- description: detailed description (2-4 sentences)
-- severity: 'critical', 'warning', 'info', or 'success'
-- category: e.g., 'safety', 'performance', 'engagement', 'progress'
-- reasoning: brief explanation of why this insight was generated (optional)
-
-Focus on:
-1. Safety concerns (pain increases, form issues)
-2. Progress milestones and achievements
-3. Adherence patterns
-4. Recommendations for protocol adjustments
-5. Risk factors that need attention
-
-**CRITICAL METRICS TO ANALYZE:**
-- **Pain Levels**: Pre-session vs Post-session pain scores (0-10 scale). Increasing pain may indicate overexertion or injury risk.
-- **Range of Motion (ROM)**: ROM delta per session shows joint mobility improvement. Positive trends indicate recovery progress.
-- **Pain Trends**: Compare recent sessions vs older sessions to identify worsening or improving pain patterns.
-- **ROM Trends**: Track ROM improvements/declines to assess rehabilitation effectiveness.
-
-Analyze this patient's rehabilitation data:
-
-Patient: ${sessionData.patient_name || sessionData.patient_id}
-Total Sessions: ${sessionData.total_sessions}
-Completed Sessions: ${sessionData.completed_sessions}
-Adherence Rate: ${sessionData.adherence_rate.toFixed(1)}%
-
-**TREND ANALYSIS:**
-- Pain Trend: ${sessionData.pain_trend} (comparing recent vs older sessions)
-- ROM Trend: ${sessionData.rom_trend} (comparing recent vs older sessions)
-
-**RECENT SESSION DETAILS:**
-${sessionData.recent_sessions.map((s, i) => `
-Session ${i + 1} (${s.date}):
-  - Pain Score: ${s.pain_score_pre !== null ? s.pain_score_pre : 'N/A'} (pre) → ${s.pain_score_post !== null ? s.pain_score_post : 'N/A'} (post) ${s.pain_score_pre !== null && s.pain_score_post !== null ? `[Change: ${(s.pain_score_post - s.pain_score_pre).toFixed(1)}]` : ''}
-  - ROM Delta: ${s.rom_delta !== null ? `${s.rom_delta}°` : 'N/A'} (range of motion improvement)
-  - Form Accuracy: ${s.accuracy_avg !== null ? `${s.accuracy_avg}%` : 'N/A'}
-  - Exercises Performed:
-${s.exercises.map(e => `    • ${e.name}: ${e.reps} reps, ${e.avg_rom !== null ? `${e.avg_rom}° ROM` : 'ROM N/A'}, ${e.avg_accuracy !== null ? `${e.avg_accuracy}% accuracy` : 'accuracy N/A'}`).join('\n')}
-`).join('\n')}
-
-**ANALYSIS REQUIREMENTS:**
-- Pay special attention to pain score increases (especially if post-session pain > 6/10)
-- Identify ROM improvement patterns (consistent gains indicate good progress)
-- Flag any sessions where pain increased significantly (>2 points)
-- Highlight ROM improvements (>5° per session indicates strong progress)
-- Consider the relationship between pain and ROM (high pain may limit ROM gains)
-
-Generate 3-7 insights. Prioritize critical safety issues first (especially pain increases). Return ONLY valid JSON, no markdown formatting.`;
-
-  try {
-    // Construct URL: if VITE_GEMINI_API_URL is a full URL, use it; otherwise build from base + model
-    let url: string;
-    if (import.meta.env.VITE_GEMINI_API_URL && import.meta.env.VITE_GEMINI_API_URL.includes(':generateContent')) {
-      // Full URL provided (legacy format)
-      url = `${import.meta.env.VITE_GEMINI_API_URL}?key=${GEMINI_API_KEY}`;
-    } else {
-      // Build URL from base + model
-      url = `${GEMINI_API_BASE}/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-    }
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        contents: [{
-          parts: [{
-            text: prompt
-          }]
-        }],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 2000,
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Gemini API error: ${response.status} - ${error}`);
-    }
-
-    const data = await response.json();
-    
-    // Extract text from Gemini response
-    let contentText = '';
-    if (data.candidates && data.candidates[0] && data.candidates[0].content) {
-      contentText = data.candidates[0].content.parts[0].text;
-    } else {
-      throw new Error('Invalid Gemini response format');
-    }
-
-    // Parse JSON response
-    let parsedContent;
-    try {
-      // Remove markdown code blocks if present
-      contentText = contentText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      parsedContent = JSON.parse(contentText);
-    } catch (parseError) {
-      console.error('[AIService] Failed to parse Gemini JSON:', contentText);
-      throw new Error('Failed to parse Gemini response as JSON');
-    }
-    
-    // Handle both array and object with 'insights' key
-    const insights = Array.isArray(parsedContent) ? parsedContent : (parsedContent.insights || []);
-    
-    return insights.map((insight: any) => ({
-      insight_type: insight.insight_type || 'recommendation',
-      title: insight.title || 'Insight',
-      description: insight.description || '',
-      severity: insight.severity || 'info',
-      category: insight.category || 'general',
-      reasoning: insight.reasoning,
-    })) as AIInsightSuggestion[];
-  } catch (error) {
-    console.error('[AIService] Gemini API error:', error);
-    throw error;
-  }
-}
-
-/**
- * Generate insights using Google Gemini API or fallback to rule-based
- */
-export async function generateAIInsights(
-  sessionData: PatientSessionData
-): Promise<AIInsightSuggestion[]> {
-  if (USE_AI_SERVICE) {
-    try {
-      console.log('[AIService] Using Google Gemini to generate insights');
-      return await generateInsightsWithGemini(sessionData);
-    } catch (error) {
-      console.warn('[AIService] Gemini failed, falling back to rule-based generation:', error);
-      // Fall through to rule-based generation
-    }
-  }
-
-  // Fallback to rule-based generation
-  console.log('[AIService] Using rule-based insight generation');
-  return generateRuleBasedInsights(sessionData);
-}
-
-/**
- * Rule-based insight generation (fallback)
+ * Rule-based insight generation
  */
 function generateRuleBasedInsights(
   sessionData: PatientSessionData
 ): AIInsightSuggestion[] {
   const insights: AIInsightSuggestion[] = [];
 
-  // Adherence insights
+  // 1) Adherence & engagement
   if (sessionData.adherence_rate < 70 && sessionData.total_sessions > 5) {
     insights.push({
       insight_type: 'adherence',
@@ -226,7 +56,7 @@ function generateRuleBasedInsights(
       category: 'engagement',
       reasoning: `Adherence rate of ${Math.round(sessionData.adherence_rate)}% is below the recommended 70% threshold.`,
     });
-  } else if (sessionData.adherence_rate >= 90 && sessionData.total_sessions > 5) {
+  } else if (sessionData.adherence_rate >= 90 && sessionData.total_sessions > 3) {
     insights.push({
       insight_type: 'adherence',
       title: 'Excellent Adherence',
@@ -237,7 +67,7 @@ function generateRuleBasedInsights(
     });
   }
 
-  // Pain trend insights
+  // 2) Pain trend & safety
   if (sessionData.pain_trend === 'increasing') {
     const recentPain = sessionData.recent_sessions
       .filter(s => s.pain_score_post !== null)
@@ -276,7 +106,7 @@ function generateRuleBasedInsights(
     });
   }
 
-  // ROM trend insights
+  // 3) ROM trend / progress
   if (sessionData.rom_trend === 'improving') {
     const recentROM = sessionData.recent_sessions
       .filter(s => s.rom_delta !== null)
@@ -306,7 +136,7 @@ function generateRuleBasedInsights(
     });
   }
 
-  // Milestone insights
+  // 4) Milestone insights
   if (sessionData.completed_sessions === 10 || sessionData.completed_sessions === 25 || sessionData.completed_sessions === 50) {
     insights.push({
       insight_type: 'milestone',
@@ -318,7 +148,7 @@ function generateRuleBasedInsights(
     });
   }
 
-  // Form/accuracy insights
+  // 5) Form/accuracy insights
   const recentAccuracy = sessionData.recent_sessions
     .filter(s => s.accuracy_avg !== null)
     .map(s => s.accuracy_avg as number);
@@ -326,7 +156,7 @@ function generateRuleBasedInsights(
     ? recentAccuracy.reduce((a, b) => a + b, 0) / recentAccuracy.length
     : 0;
 
-  if (avgAccuracy < 70 && recentAccuracy.length > 3) {
+  if (avgAccuracy < 75 && recentAccuracy.length > 2) {
     insights.push({
       insight_type: 'form',
       title: 'Form Accuracy Below Target',
@@ -337,11 +167,46 @@ function generateRuleBasedInsights(
     });
   }
 
+  // 6) Session‑level encouragement / recommendations based on the most recent session
+  if (sessionData.recent_sessions.length > 0) {
+    const last = sessionData.recent_sessions[0];
+
+    if (
+      last.rom_delta !== null &&
+      last.rom_delta > 5 &&
+      last.pain_score_pre !== null &&
+      last.pain_score_post !== null &&
+      last.pain_score_post < last.pain_score_pre
+    ) {
+      insights.push({
+        insight_type: 'milestone',
+        title: 'Milestone: Better ROM With Lower Pain',
+        description: 'The latest session shows a meaningful ROM gain together with reduced pain. This is a strong indicator that the current rehab plan is effective.',
+        severity: 'success',
+        category: 'progress',
+        reasoning: `ROM improved by ${last.rom_delta}° and pain decreased from ${last.pain_score_pre} to ${last.pain_score_post}.`,
+      });
+    }
+  }
+
+  // 7) Ensure at least one high‑level insight
+  if (insights.length === 0) {
+    insights.push({
+      insight_type: 'progress',
+      title: 'Stable Rehabilitation Status',
+      description: 'Patient’s rehabilitation metrics are stable with no major changes in pain or ROM. Maintain the current protocol and continue to monitor adherence.',
+      severity: 'info',
+      category: 'progress',
+      reasoning: 'No significant negative trends in pain, ROM, or adherence were detected.',
+    });
+  }
+
   return insights;
 }
 
 export const aiService = {
-  generateInsights: generateAIInsights,
-  isAIConfigured: USE_AI_SERVICE,
+  // Now always rule‑based – no external AI calls.
+  generateInsights: generateRuleBasedInsights,
+  isAIConfigured: false,
 };
 
